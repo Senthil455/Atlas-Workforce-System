@@ -19,11 +19,9 @@ test.describe('Compliance Dashboard', () => {
     await expect(page.locator('h1')).toContainText(/compliance|Compliance/i);
 
     const auditLink = page.locator('a:has-text("Audit"), button:has-text("Audit")').first();
-    if (await auditLink.isVisible()) {
-      await auditLink.click();
-    }
-
-    await expect(page).toHaveURL(/.*audit.*|.*compliance.*/i);
+    await auditLink.waitFor({ state: 'visible', timeout: 5000 });
+    await auditLink.click();
+    await expect(page).toHaveURL(/.*audit.*/i);
   });
 
   test('check compliance policies', async ({ page }) => {
@@ -32,10 +30,8 @@ test.describe('Compliance Dashboard', () => {
     const policiesLink = page.locator(
       'a:has-text("Policy"), a:has-text("Policies"), button:has-text("Policy"), button:has-text("Policies")'
     ).first();
-    if (await policiesLink.isVisible()) {
-      await policiesLink.click();
-    }
-
-    await expect(page).toHaveURL(/.*policy.*|.*compliance.*/i);
+    await policiesLink.waitFor({ state: 'visible', timeout: 5000 });
+    await policiesLink.click();
+    await expect(page).toHaveURL(/.*policies.*|.*policy.*/i);
   });
 });

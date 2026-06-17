@@ -21,7 +21,7 @@ test.describe('LMS Workflow', () => {
 
     const courseCards = page.locator('a[href*="/dashboard/lms/courses/"]');
     const count = await courseCards.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+    expect(count).toBeGreaterThan(0);
   });
 
   test('enroll in a course', async ({ page }) => {
@@ -29,10 +29,9 @@ test.describe('LMS Workflow', () => {
     await expect(page.locator('h1')).toContainText('Courses');
 
     const enrollButton = page.locator('button:has-text("Enroll"), a:has-text("Enroll")').first();
-    if (await enrollButton.isVisible()) {
-      await enrollButton.click();
-      await expect(page.getByText(/enrolled|Enrolled|successfully/i)).toBeVisible();
-    }
+    await enrollButton.waitFor({ state: 'visible', timeout: 5000 });
+    await enrollButton.click();
+    await expect(page.getByText(/enrolled|Enrolled|successfully/i)).toBeVisible();
 
     await page.goto('/dashboard/lms');
     await expect(page.locator('h1')).toContainText('Learning Management');
