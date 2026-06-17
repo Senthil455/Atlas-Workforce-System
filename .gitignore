@@ -39,3 +39,6 @@ Thumbs.db
 
 # Temp files
 *.tmp
+
+# Backup files
+*.bak
