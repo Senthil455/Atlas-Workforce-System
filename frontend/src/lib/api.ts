@@ -59,6 +59,8 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
+    original._retry = true;
+
     if (refreshPromise) {
       const token = await refreshPromise;
       if (token) {
@@ -68,7 +70,6 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    original._retry = true;
     refreshPromise = axios
       .post(`${API_BASE}/auth/refresh`, {}, { withCredentials: true })
       .then(({ data }) => {
