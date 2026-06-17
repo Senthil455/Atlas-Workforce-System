@@ -1,6 +1,6 @@
 package com.ems.payroll;
 
-import com.ems.payroll.security.RequiresRole;
+import com.atlas.common.security.RequiresRole;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;

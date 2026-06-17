@@ -1,6 +1,6 @@
 package com.atlas.leave;
 
-import com.atlas.leave.security.RequiresRole;
+import com.atlas.common.security.RequiresRole;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;

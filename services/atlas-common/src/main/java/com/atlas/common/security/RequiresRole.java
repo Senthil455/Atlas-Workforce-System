@@ -1,4 +1,4 @@
-package com.ems.payroll.security;
+package com.atlas.common.security;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

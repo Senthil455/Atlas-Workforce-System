@@ -1,7 +1,7 @@
 package com.atlas.performance.controller;
 
 import com.atlas.performance.model.Goal;
-import com.atlas.performance.security.RequiresRole;
+import com.atlas.common.security.RequiresRole;
 import com.atlas.performance.service.PerformanceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
