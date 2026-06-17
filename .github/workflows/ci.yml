@@ -105,7 +105,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [employee-python-service, analytics-python-service]
+        service: [employee-python-service, analytics-python-service, integration-service]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -121,6 +121,9 @@ jobs:
         working-directory: services/${{ matrix.service }}
       - name: Install linting tools
         run: pip install flake8 pytest httpx bandit
+        working-directory: services/${{ matrix.service }}
+      - name: Syntax check
+        run: python -m py_compile main.py
         working-directory: services/${{ matrix.service }}
       - name: Lint Python
         run: flake8 . --max-line-length=120
@@ -141,8 +144,12 @@ jobs:
             echo "POSTGRES_USER=test" >> $GITHUB_ENV
             echo "POSTGRES_PASSWORD=test" >> $GITHUB_ENV
             echo "INTERNAL_JWT_SECRET=test-secret" >> $GITHUB_ENV
+          elif [[ "${{ matrix.service }}" == "integration-service" ]]; then
+            echo "INTERNAL_API_KEY=test-key" >> $GITHUB_ENV
+            echo "DATABASE_URL=sqlite:///test.db" >> $GITHUB_ENV
           fi
       - name: Test Python
+        if: hashFiles(format('services/{0}/test_*.py', matrix.service)) != '' || hashFiles(format('services/{0}/tests/**', matrix.service)) != ''
         run: pytest -v
         working-directory: services/${{ matrix.service }}
 
