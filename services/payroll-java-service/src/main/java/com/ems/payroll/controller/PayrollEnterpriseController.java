@@ -1,7 +1,7 @@
 package com.ems.payroll.controller;
 
 import com.ems.payroll.model.*;
-import com.ems.payroll.security.RequiresRole;
+import com.atlas.common.security.RequiresRole;
 import com.ems.payroll.service.PayrollEnterpriseService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;

@@ -1,4 +1,4 @@
-package com.ems.payroll.security;
+package com.atlas.common.security;
 
 import jakarta.servlet.http.HttpServletRequest;
 import org.aspectj.lang.ProceedingJoinPoint;
