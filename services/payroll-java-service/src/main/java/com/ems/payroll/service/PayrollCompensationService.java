@@ -6,6 +6,8 @@ import com.ems.payroll.model.PayrollAudit;
 import com.ems.payroll.repository.EnhancedPayrollRepository;
 import com.ems.payroll.repository.OutboxEventRepository;
 import com.ems.payroll.repository.PayrollAuditRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -15,6 +17,8 @@ import java.util.Map;
 
 @Service
 public class PayrollCompensationService {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final EnhancedPayrollRepository payrollRepo;
     private final OutboxEventRepository outboxEventRepository;
@@ -51,7 +55,7 @@ public class PayrollCompensationService {
         compensationEvent.setAggregateType("payroll");
         compensationEvent.setAggregateId(payrollId);
         compensationEvent.setEventType("PAYROLL_COMPENSATED");
-        compensationEvent.setPayload("{\"payrollId\":\"" + payrollId + "\",\"reason\":\"" + reason + "\"}");
+        compensationEvent.setPayload(toJson(Map.of("payrollId", payrollId, "reason", reason)));
         compensationEvent.setStatus("PENDING");
         compensationEvent.setRetryCount(0);
         compensationEvent.setCreatedAt(LocalDateTime.now());
@@ -64,10 +68,18 @@ public class PayrollCompensationService {
         failureEvent.setAggregateType("payroll");
         failureEvent.setAggregateId(payrollId);
         failureEvent.setEventType("PAYROLL_FAILED");
-        failureEvent.setPayload("{\"payrollId\":\"" + payrollId + "\",\"error\":\"" + errorMessage + "\"}");
+        failureEvent.setPayload(toJson(Map.of("payrollId", payrollId, "error", errorMessage)));
         failureEvent.setStatus("PENDING");
         failureEvent.setRetryCount(0);
         failureEvent.setCreatedAt(LocalDateTime.now());
         outboxEventRepository.save(failureEvent);
+    }
+
+    private static String toJson(Map<String, Object> payload) {
+        try {
+            return MAPPER.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize outbox payload", e);
+        }
     }
 }
