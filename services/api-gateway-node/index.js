@@ -13,7 +13,29 @@ const crypto = require('crypto');
 const cookieParser = require('cookie-parser');
 const dns = require('dns');
 const { promisify } = require('util');
+const promClient = require('prom-client');
 const resolveDns = promisify(dns.resolve4);
+
+const httpRequestCount = new promClient.Counter({
+  name: 'atlas_http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'path', 'status_code'],
+});
+
+const httpRequestDuration = new promClient.Histogram({
+  name: 'atlas_http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'path', 'status_code'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+});
+
+const httpRequestsInProgress = new promClient.Gauge({
+  name: 'atlas_http_requests_in_progress',
+  help: 'Number of HTTP requests in progress',
+  labelNames: ['method', 'path'],
+});
+
+promClient.collectDefaultMetrics();
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://redis:6379';
 const redisClient = redis.createClient({ url: REDIS_URL });
@@ -135,6 +157,23 @@ const globalLimiter = rateLimit({
   message: { message: 'Too many requests, please try again later' }
 });
 app.use(globalLimiter);
+
+function metricsMiddleware(req, res, next) {
+  if (req.path === '/metrics' || req.path === '/health') {
+    return next();
+  }
+  const path = req.path.replace(/\/[0-9a-fA-F-]{36}|\/\d+/g, '/:param');
+  httpRequestsInProgress.labels({ method: req.method, path }).inc();
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = (Date.now() - start) / 1000;
+    httpRequestsInProgress.labels({ method: req.method, path }).dec();
+    httpRequestCount.labels({ method: req.method, path, status_code: res.statusCode }).inc();
+    httpRequestDuration.labels({ method: req.method, path, status_code: res.statusCode }).observe(duration);
+  });
+  next();
+}
+app.use(metricsMiddleware);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -298,7 +337,7 @@ const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
 const PUBLIC_AUTH_PATHS = ['/api/auth/login', '/api/auth/register'];
 
 function isPublicPath(path) {
-  if (path === '/health') return true;
+  if (path === '/health' || path === '/metrics') return true;
   return PUBLIC_AUTH_PATHS.some((p) => path === p || path.startsWith(p + '?'));
 }
 
@@ -774,4 +813,9 @@ server.on('upgrade', (req, socket, head) => {
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'API Gateway is running' });
+});
+
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', promClient.register.contentType);
+  res.end(await promClient.register.metrics());
 });

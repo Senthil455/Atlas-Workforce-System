@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,8 +14,42 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 )
+
+var (
+	httpRequestCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "atlas_http_requests_total",
+			Help: "Total HTTP requests",
+		},
+		[]string{"method", "path", "status_code"},
+	)
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "atlas_http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+		[]string{"method", "path", "status_code"},
+	)
+	httpRequestsInProgress = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "atlas_http_requests_in_progress",
+			Help: "Number of HTTP requests in progress",
+		},
+		[]string{"method", "path"},
+	)
+	pathParamPattern = regexp.MustCompile(`/[0-9a-fA-F-]{36}|/\d+`)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestCount)
+	prometheus.MustRegister(httpRequestDuration)
+	prometheus.MustRegister(httpRequestsInProgress)
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -450,6 +485,34 @@ func processMessage(body []byte) {
 	broadcast <- BroadcastMessage{TenantID: tenantID, Payload: jsonMsg}
 }
 
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" || r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		path := pathParamPattern.ReplaceAllString(r.URL.Path, "/:param")
+		httpRequestsInProgress.WithLabelValues(r.Method, path).Inc()
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		duration := time.Since(start).Seconds()
+		httpRequestsInProgress.WithLabelValues(r.Method, path).Dec()
+		httpRequestCount.WithLabelValues(r.Method, path, fmt.Sprintf("%d", sw.statusCode)).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, path, fmt.Sprintf("%d", sw.statusCode)).Observe(duration)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.statusCode = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -460,6 +523,9 @@ func main() {
 	go setupRabbitMQConsumer()
 
 	mux := http.NewServeMux()
+
+	// Metrics
+	mux.Handle("/metrics", promhttp.Handler())
 
 	// Health
 	mux.HandleFunc("/health", healthHandler)
@@ -489,7 +555,7 @@ func main() {
 	}))
 
 	log.Printf("Notification Service listening on port %s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, metricsMiddleware(mux)); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

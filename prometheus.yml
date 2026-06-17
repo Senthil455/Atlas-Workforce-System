@@ -79,3 +79,11 @@ scrape_configs:
   - job_name: 'ai-service'
     static_configs:
       - targets: ['ai-service:8065']
+
+  - job_name: 'live-service'
+    static_configs:
+      - targets: ['live-service:8060']
+
+  - job_name: 'workforce-planning-service'
+    static_configs:
+      - targets: ['workforce-planning-service:8017']

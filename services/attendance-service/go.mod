@@ -3,8 +3,10 @@ module atlas/attendance-service
 go 1.21
 
 require (
+	github.com/gofiber/adaptor/v2 v2.2.1
 	github.com/gofiber/fiber/v2 v2.50.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/prometheus/client_golang v1.19.0
 	github.com/streadway/amqp v1.1.0
 	gorm.io/driver/postgres v1.5.2
 	gorm.io/gorm v1.25.4

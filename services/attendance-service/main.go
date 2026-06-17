@@ -5,14 +5,50 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"time"
 
+	"github.com/gofiber/adaptor/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+var (
+	httpRequestCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "atlas_http_requests_total",
+			Help: "Total HTTP requests",
+		},
+		[]string{"method", "path", "status_code"},
+	)
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "atlas_http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+		[]string{"method", "path", "status_code"},
+	)
+	httpRequestsInProgress = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "atlas_http_requests_in_progress",
+			Help: "Number of HTTP requests in progress",
+		},
+		[]string{"method", "path"},
+	)
+	pathParamPattern = regexp.MustCompile(`/[0-9a-fA-F-]{36}|/\d+`)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestCount)
+	prometheus.MustRegister(httpRequestDuration)
+	prometheus.MustRegister(httpRequestsInProgress)
+}
 
 var db *gorm.DB
 var rabbitChan *amqp.Channel
@@ -245,6 +281,28 @@ func main() {
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders: "Origin,Content-Type,Accept,Authorization,X-Tenant-Id,X-Employee-Id",
 	}))
+
+	app.Use(func(c *fiber.Ctx) error {
+		path := pathParamPattern.ReplaceAllString(c.Path(), "/:param")
+		httpRequestsInProgress.WithLabelValues(c.Method(), path).Inc()
+		start := time.Now()
+		err := c.Next()
+		duration := time.Since(start).Seconds()
+		status := fiber.StatusInternalServerError
+		if err != nil {
+			if e, ok := err.(*fiber.Error); ok {
+				status = e.Code
+			}
+		} else {
+			status = c.Response().StatusCode()
+		}
+		httpRequestsInProgress.WithLabelValues(c.Method(), path).Dec()
+		httpRequestCount.WithLabelValues(c.Method(), path, fmt.Sprintf("%d", status)).Inc()
+		httpRequestDuration.WithLabelValues(c.Method(), path, fmt.Sprintf("%d", status)).Observe(duration)
+		return err
+	})
+
+	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "Attendance Service is running", "version": "2.0.0"})

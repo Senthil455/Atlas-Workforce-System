@@ -21,6 +21,29 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
+const promClient = require('prom-client');
+
+const httpRequestCount = new promClient.Counter({
+  name: 'atlas_http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'path', 'status_code'],
+});
+
+const httpRequestDuration = new promClient.Histogram({
+  name: 'atlas_http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'path', 'status_code'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+});
+
+const httpRequestsInProgress = new promClient.Gauge({
+  name: 'atlas_http_requests_in_progress',
+  help: 'Number of HTTP requests in progress',
+  labelNames: ['method', 'path'],
+});
+
+promClient.collectDefaultMetrics();
+
 const app = express();
 app.use(helmet());
 app.use(cookieParser());
@@ -43,6 +66,23 @@ app.use(
     credentials: true,
   })
 );
+
+function metricsMiddleware(req, res, next) {
+  if (req.path === '/metrics' || req.path === '/health') {
+    return next();
+  }
+  const path = req.path.replace(/\/[0-9a-fA-F-]{36}|\/\d+/g, '/:param');
+  httpRequestsInProgress.labels({ method: req.method, path }).inc();
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = (Date.now() - start) / 1000;
+    httpRequestsInProgress.labels({ method: req.method, path }).dec();
+    httpRequestCount.labels({ method: req.method, path, status_code: res.statusCode }).inc();
+    httpRequestDuration.labels({ method: req.method, path, status_code: res.statusCode }).observe(duration);
+  });
+  next();
+}
+app.use(metricsMiddleware);
 
 const PORT = process.env.PORT || 8010;
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -2266,6 +2306,11 @@ app.delete('/oauth/links/:provider', requireRole(), async (req, res) => {
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'Auth Service is healthy' });
+});
+
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', promClient.register.contentType);
+  res.end(await promClient.register.metrics());
 });
 
 app.listen(PORT, () => {

@@ -11,7 +11,7 @@ groups:
           description: "{{ $labels.job }} has been unreachable for more than 30 seconds."
 
       - alert: HighErrorRate
-        expr: sum by (job) (rate(atlas_http_requests_total{status_code=~"5[0-9][0-9]"}[5m])) / sum by (job) (rate(atlas_http_requests_total[5m])) > 0.05
+        expr: rate(atlas_http_requests_total{status_code=~"5.."}[5m]) > 0.05
         for: 1m
         labels:
           severity: warning

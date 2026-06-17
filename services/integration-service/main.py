@@ -144,10 +144,11 @@ app.add_middleware(
 )
 
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(AtlasMetricsMiddleware)
 
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
-    if request.url.path == "/health":
+    if request.url.path in ("/health", "/metrics"):
         return await call_next(request)
 
     auth_header = request.headers.get("x-internal-auth")
