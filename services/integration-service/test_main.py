@@ -5,7 +5,7 @@ from httpx import AsyncClient, ASGITransport
 os.environ.setdefault("DATABASE_URL", "sqlite:///test.db")
 os.environ.setdefault("INTERNAL_API_KEY", "test-key")
 
-from main import app
+from main import app  # noqa: E402
 
 
 @pytest.mark.asyncio

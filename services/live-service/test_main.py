@@ -4,7 +4,7 @@ from httpx import AsyncClient, ASGITransport
 
 os.environ.setdefault("INTERNAL_JWT_SECRET", "test-secret")
 
-from main import app
+from main import app  # noqa: E402
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -12,7 +13,8 @@ func TestGetEnv(t *testing.T) {
 }
 
 func TestIsDuplicateKeyError(t *testing.T) {
-	if isDuplicateKeyError(nil) {
-		t.Error("expected false for nil error")
+	err := fmt.Errorf("duplicate key value violates unique constraint")
+	if !isDuplicateKeyError(err) {
+		t.Error("expected true for duplicate key error")
 	}
 }

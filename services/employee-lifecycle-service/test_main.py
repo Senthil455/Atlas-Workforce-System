@@ -4,7 +4,7 @@ from httpx import AsyncClient, ASGITransport
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///test.db")
 
-from main import app
+from main import app  # noqa: E402
 
 
 @pytest.mark.skip(reason="Requires database connection")
