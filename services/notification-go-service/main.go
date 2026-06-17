@@ -173,6 +173,9 @@ func validateJWT(tokenString string) (*wsClaims, error) {
 	if !ok {
 		return nil, fmt.Errorf("invalid token claims")
 	}
+	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(time.Now()) {
+		return nil, fmt.Errorf("token has expired")
+	}
 	return claims, nil
 }
 
@@ -205,6 +208,11 @@ func internalAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		claims, ok := token.Claims.(*internalAuthClaims)
 		if !ok {
 			http.Error(w, `{"error":"Invalid token claims"}`, http.StatusUnauthorized)
+			return
+		}
+
+		if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(time.Now()) {
+			http.Error(w, `{"error":"Token has expired"}`, http.StatusUnauthorized)
 			return
 		}
 
