@@ -191,7 +191,7 @@ function signAccessToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id || 'default' },
     jwtSecret,
-    { expiresIn: ACCESS_EXPIRY }
+    { algorithm: 'HS256', expiresIn: ACCESS_EXPIRY }
   );
 }
 
@@ -199,7 +199,7 @@ function signMfaToken(userId) {
   return jwt.sign(
     { id: userId, mfa_validated: true, purpose: 'mfa_step_up' },
     jwtSecret,
-    { expiresIn: '5m' }
+    { algorithm: 'HS256', expiresIn: '5m' }
   );
 }
 
@@ -298,7 +298,7 @@ function requireRole(...roles) {
     }
     try {
       const token = authHeader.slice(7);
-      const payload = jwt.verify(token, jwtSecret);
+      const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
       if (roles.length && !roles.includes(payload.role)) {
         return res.status(403).json({ message: 'Insufficient permissions' });
       }
@@ -320,7 +320,7 @@ function requireScimAuth(req, res, next) {
 
   if (authHeader?.startsWith('Bearer ')) {
     try {
-      const payload = jwt.verify(authHeader.slice(7), jwtSecret);
+      const payload = jwt.verify(authHeader.slice(7), jwtSecret, { algorithms: ['HS256'] });
       req.user = payload;
       return next();
     } catch {

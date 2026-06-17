@@ -701,7 +701,7 @@ function proxyService(target, prefix, pathRewrite) {
         email: req.user.email || '',
         exp: Math.floor(Date.now() / 1000) + 10
       };
-      const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET);
+      const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET, { algorithm: 'HS256' });
       req.headers['x-internal-auth'] = internalToken;
     }
     req.url = prefix + req.url;
@@ -784,7 +784,7 @@ server.on('upgrade', (req, socket, head) => {
         tenant_id: payload.tenant_id || 'default',
         exp: Math.floor(Date.now() / 1000) + 5
       };
-      const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET);
+      const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET, { algorithm: 'HS256' });
       req.headers['x-internal-auth'] = internalToken;
     } catch {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
