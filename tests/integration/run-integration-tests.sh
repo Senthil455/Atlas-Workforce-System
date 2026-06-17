@@ -96,14 +96,16 @@ else
   fi
 fi
 
+COOKIE_JAR=$(mktemp)
+
 TESTS+=("Login with valid credentials")
 LOGIN_RES=$(curl -sf -X POST "$AUTH_URL/login" \
   -H 'Content-Type: application/json' \
+  -c "$COOKIE_JAR" \
   -d '{"email":"admin@atlas.io","password":"ChangeMe123!"}') || { report_fail "Login with valid credentials"; LOGIN_RES=""; }
 
 if [ -n "$LOGIN_RES" ]; then
   TOKEN=$(echo "$LOGIN_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null) || TOKEN=""
-  REFRESH_TOKEN=$(echo "$LOGIN_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['refreshToken'])" 2>/dev/null) || REFRESH_TOKEN=""
   USER_ID=$(echo "$LOGIN_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['id'])" 2>/dev/null) || USER_ID=""
   if [ -n "$TOKEN" ]; then
     report_pass "Login with valid credentials"
@@ -125,10 +127,11 @@ else
 fi
 
 TESTS+=("Token refresh")
-if [ -n "$REFRESH_TOKEN" ]; then
+if [ -s "$COOKIE_JAR" ] && grep -q "refreshToken" "$COOKIE_JAR" 2>/dev/null; then
   REFRESH_RES=$(curl -sf -X POST "$AUTH_URL/refresh" \
     -H 'Content-Type: application/json' \
-    -d "{\"refreshToken\":\"$REFRESH_TOKEN\"}") || REFRESH_RES=""
+    -b "$COOKIE_JAR" \
+    -c "$COOKIE_JAR") || REFRESH_RES=""
   NEW_TOKEN=$(echo "$REFRESH_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null) || NEW_TOKEN=""
   if [ -n "$NEW_TOKEN" ]; then
     report_pass "Token refresh"
@@ -137,8 +140,10 @@ if [ -n "$REFRESH_TOKEN" ]; then
     report_fail "Token refresh"
   fi
 else
-  report_fail "Token refresh — no refresh token"
+  report_fail "Token refresh — no refresh token cookie"
 fi
+
+rm -f "$COOKIE_JAR"
 
 # ────────────────────────────────────────────────────────────────────────────
 #  3. Employee CRUD Flow
