@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/atlas-workforce/lms-service/middleware"
@@ -19,35 +20,69 @@ func (h *LearningAnalyticsHandler) Overview(c *fiber.Ctx) error {
 	tenantID := middleware.GetTenant(c)
 
 	var totalCourses, pubCourses int64
-	h.DB.Model(&models.Course{}).Where("tenant_id = ?", tenantID).Count(&totalCourses)
-	h.DB.Model(&models.Course{}).Where("tenant_id = ? AND status = ?", tenantID, "PUBLISHED").Count(&pubCourses)
+	if err := h.DB.Model(&models.Course{}).Where("tenant_id = ?", tenantID).Count(&totalCourses).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query courses"})
+	}
+	if err := h.DB.Model(&models.Course{}).Where("tenant_id = ? AND status = ?", tenantID, "PUBLISHED").Count(&pubCourses).Error; err != nil {
+		log.Printf("learning_analytics Overview pubCourses: %v", err)
+	}
 
 	var totalEnrollments, completedEnrollments, inProgress int64
-	h.DB.Model(&models.Enrollment{}).Where("tenant_id = ?", tenantID).Count(&totalEnrollments)
-	h.DB.Model(&models.Enrollment{}).Where("tenant_id = ? AND status = ?", tenantID, "COMPLETED").Count(&completedEnrollments)
-	h.DB.Model(&models.Enrollment{}).Where("tenant_id = ? AND status = ?", tenantID, "IN_PROGRESS").Count(&inProgress)
+	if err := h.DB.Model(&models.Enrollment{}).Where("tenant_id = ?", tenantID).Count(&totalEnrollments).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query enrollments"})
+	}
+	if err := h.DB.Model(&models.Enrollment{}).Where("tenant_id = ? AND status = ?", tenantID, "COMPLETED").Count(&completedEnrollments).Error; err != nil {
+		log.Printf("learning_analytics Overview completed: %v", err)
+	}
+	if err := h.DB.Model(&models.Enrollment{}).Where("tenant_id = ? AND status = ?", tenantID, "IN_PROGRESS").Count(&inProgress).Error; err != nil {
+		log.Printf("learning_analytics Overview inProgress: %v", err)
+	}
 
 	var totalCerts, activeCerts, expiringCerts int64
-	h.DB.Model(&models.Certification{}).Where("tenant_id = ?", tenantID).Count(&totalCerts)
-	h.DB.Model(&models.Certification{}).Where("tenant_id = ? AND status = ?", tenantID, "ACTIVE").Count(&activeCerts)
-	h.DB.Raw("SELECT COUNT(*) FROM certifications WHERE tenant_id = ? AND status = 'ACTIVE' AND expiry_date IS NOT NULL AND expiry_date BETWEEN NOW() AND NOW() + INTERVAL '30 days'", tenantID).Scan(&expiringCerts)
+	if err := h.DB.Model(&models.Certification{}).Where("tenant_id = ?", tenantID).Count(&totalCerts).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query certifications"})
+	}
+	if err := h.DB.Model(&models.Certification{}).Where("tenant_id = ? AND status = ?", tenantID, "ACTIVE").Count(&activeCerts).Error; err != nil {
+		log.Printf("learning_analytics Overview activeCerts: %v", err)
+	}
+	if err := h.DB.Raw("SELECT COUNT(*) FROM certifications WHERE tenant_id = ? AND status = 'ACTIVE' AND expiry_date IS NOT NULL AND expiry_date BETWEEN NOW() AND NOW() + INTERVAL '30 days'", tenantID).Scan(&expiringCerts).Error; err != nil {
+		log.Printf("learning_analytics Overview expiring: %v", err)
+	}
 
 	var totalAssessments, totalAttempts, passedAttempts int64
-	h.DB.Model(&models.Assessment{}).Where("tenant_id = ?", tenantID).Count(&totalAssessments)
-	h.DB.Model(&models.AssessmentAttempt{}).Where("tenant_id = ?", tenantID).Count(&totalAttempts)
-	h.DB.Model(&models.AssessmentAttempt{}).Where("tenant_id = ? AND passed = ?", tenantID, true).Count(&passedAttempts)
+	if err := h.DB.Model(&models.Assessment{}).Where("tenant_id = ?", tenantID).Count(&totalAssessments).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query assessments"})
+	}
+	if err := h.DB.Model(&models.AssessmentAttempt{}).Where("tenant_id = ?", tenantID).Count(&totalAttempts).Error; err != nil {
+		log.Printf("learning_analytics Overview totalAttempts: %v", err)
+	}
+	if err := h.DB.Model(&models.AssessmentAttempt{}).Where("tenant_id = ? AND passed = ?", tenantID, true).Count(&passedAttempts).Error; err != nil {
+		log.Printf("learning_analytics Overview passedAttempts: %v", err)
+	}
 
 	var totalSkills, totalJourneys int64
-	h.DB.Model(&models.SkillMatrix{}).Where("tenant_id = ?", tenantID).Count(&totalSkills)
-	h.DB.Model(&models.LearningJourney{}).Where("tenant_id = ?", tenantID).Count(&totalJourneys)
+	if err := h.DB.Model(&models.SkillMatrix{}).Where("tenant_id = ?", tenantID).Count(&totalSkills).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query skills"})
+	}
+	if err := h.DB.Model(&models.LearningJourney{}).Where("tenant_id = ?", tenantID).Count(&totalJourneys).Error; err != nil {
+		log.Printf("learning_analytics Overview totalJourneys: %v", err)
+	}
 
 	var totalCompliance, completedCompliance int64
-	h.DB.Model(&models.ComplianceTraining{}).Where("tenant_id = ?", tenantID).Count(&totalCompliance)
-	h.DB.Model(&models.ComplianceTraining{}).Where("tenant_id = ? AND status = ?", tenantID, "COMPLETED").Count(&completedCompliance)
+	if err := h.DB.Model(&models.ComplianceTraining{}).Where("tenant_id = ?", tenantID).Count(&totalCompliance).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query compliance"})
+	}
+	if err := h.DB.Model(&models.ComplianceTraining{}).Where("tenant_id = ? AND status = ?", tenantID, "COMPLETED").Count(&completedCompliance).Error; err != nil {
+		log.Printf("learning_analytics Overview completedCompliance: %v", err)
+	}
 
 	var totalKnowledge, totalMarketplace int64
-	h.DB.Model(&models.KnowledgeArticle{}).Where("tenant_id = ?", tenantID).Count(&totalKnowledge)
-	h.DB.Model(&models.MarketplaceListing{}).Where("tenant_id = ?", tenantID).Count(&totalMarketplace)
+	if err := h.DB.Model(&models.KnowledgeArticle{}).Where("tenant_id = ?", tenantID).Count(&totalKnowledge).Error; err != nil {
+		log.Printf("learning_analytics Overview totalKnowledge: %v", err)
+	}
+	if err := h.DB.Model(&models.MarketplaceListing{}).Where("tenant_id = ?", tenantID).Count(&totalMarketplace).Error; err != nil {
+		log.Printf("learning_analytics Overview totalMarketplace: %v", err)
+	}
 
 	completionRate := 0.0
 	if totalEnrollments > 0 {
@@ -84,13 +119,13 @@ func (h *LearningAnalyticsHandler) Department(c *fiber.Ctx) error {
 	tenantID := middleware.GetTenant(c)
 
 	var deptStats []struct {
-		Department    string `json:"department"`
+		EmployeeID    string `json:"employee_id"`
 		TotalEnrolled int64  `json:"total_enrolled"`
 		Completed     int64  `json:"completed"`
 		InProgress    int64  `json:"in_progress"`
 	}
-	h.DB.Raw(`
-		SELECT e.employee_id as department,
+	if err := h.DB.Raw(`
+		SELECT e.employee_id,
 			COUNT(*) as total_enrolled,
 			SUM(CASE WHEN e.status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
 			SUM(CASE WHEN e.status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as in_progress
@@ -98,7 +133,9 @@ func (h *LearningAnalyticsHandler) Department(c *fiber.Ctx) error {
 		WHERE e.tenant_id = ?
 		GROUP BY e.employee_id
 		ORDER BY total_enrolled DESC
-		LIMIT 10`, tenantID).Scan(&deptStats)
+		LIMIT 10`, tenantID).Scan(&deptStats).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch department stats"})
+	}
 
 	return c.JSON(fiber.Map{"data": deptStats})
 }
@@ -117,14 +154,16 @@ func (h *LearningAnalyticsHandler) Trends(c *fiber.Ctx) error {
 		trunc = "DATE_TRUNC('week', created_at)::date"
 	}
 
-	h.DB.Raw(`
+	if err := h.DB.Raw(`
 		SELECT `+trunc+` as period,
 			COUNT(*) as enrollments,
 			SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completions
 		FROM enrollments
 		WHERE tenant_id = ? AND created_at > NOW() - INTERVAL '12 months'
 		GROUP BY period
-		ORDER BY period ASC`, tenantID).Scan(&trends)
+		ORDER BY period ASC`, tenantID).Scan(&trends).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch trends"})
+	}
 
 	return c.JSON(fiber.Map{"data": trends})
 }
@@ -133,10 +172,14 @@ func (h *LearningAnalyticsHandler) CompetencyMatrix(c *fiber.Ctx) error {
 	tenantID := middleware.GetTenant(c)
 
 	var frameworks []models.CompetencyFramework
-	h.DB.Where("tenant_id = ? AND status = ?", tenantID, "ACTIVE").Find(&frameworks)
+	if err := h.DB.Where("tenant_id = ? AND status = ?", tenantID, "ACTIVE").Find(&frameworks).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch frameworks"})
+	}
 
 	var allSkills []models.SkillMatrix
-	h.DB.Where("tenant_id = ?", tenantID).Find(&allSkills)
+	if err := h.DB.Where("tenant_id = ?", tenantID).Find(&allSkills).Error; err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch skills"})
+	}
 
 	empSkillMap := make(map[string]map[string]models.SkillMatrix)
 	for _, s := range allSkills {
@@ -244,8 +287,10 @@ func (h *SkillEndorsementHandler) Create(c *fiber.Ctx) error {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create endorsement"})
 	}
 	if req.SkillID != "" {
-		h.DB.Model(&models.SkillMatrix{}).Where("id = ? AND tenant_id = ?", req.SkillID, tenantID).
-			Update("endorsed_by", req.EndorsedBy)
+		if err := h.DB.Model(&models.SkillMatrix{}).Where("id = ? AND tenant_id = ?", req.SkillID, tenantID).
+			Update("endorsed_by", req.EndorsedBy).Error; err != nil {
+			log.Printf("SkillEndorsementHandler.Create update skill matrix: %v", err)
+		}
 	}
 	return c.Status(http.StatusCreated).JSON(fiber.Map{"data": endorsement})
 }
