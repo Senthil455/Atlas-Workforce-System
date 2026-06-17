@@ -31,7 +31,7 @@ public class OutboxPublisherService {
     @Scheduled(fixedDelayString = "${outbox.poll.interval:5000}")
     @Transactional
     public void publishPendingEvents() {
-        List<OutboxEvent> pendingEvents = outboxEventRepository.findByStatusAndRetryCountLessThan("PENDING", maxRetries);
+        List<OutboxEvent> pendingEvents = outboxEventRepository.findPendingEventsWithLock(maxRetries);
         for (OutboxEvent event : pendingEvents) {
             try {
                 String routingKey = resolveRoutingKey(event.getEventType());
