@@ -121,6 +121,11 @@ if (!SCIM_API_KEY) {
 
 const jwtSecret = JWT_SECRET;
 
+if (!process.env.POSTGRES_URL) {
+  console.error('FATAL: POSTGRES_URL environment variable is required');
+  process.exit(1);
+}
+
 const sslConfig = process.env.POSTGRES_SSL === 'true' || NODE_ENV === 'production'
   ? { rejectUnauthorized: true }
   : false;
@@ -129,11 +134,6 @@ const pool = new Pool({
   connectionString: process.env.POSTGRES_URL,
   ssl: sslConfig,
 });
-
-if (!process.env.POSTGRES_URL) {
-  console.error('FATAL: POSTGRES_URL environment variable is required');
-  process.exit(1);
-}
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://redis:6379';
 const redisClient = redis.createClient({ url: REDIS_URL });
