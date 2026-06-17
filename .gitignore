@@ -39,3 +39,9 @@ Thumbs.db
 
 # Temp files
 *.tmp
+
+# Backup files
+*.bak
+
+# Environment test files
+.env.test
