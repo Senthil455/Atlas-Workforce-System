@@ -94,6 +94,9 @@ jobs:
       - name: Compile check
         run: go build -v ./...
         working-directory: services/${{ matrix.service }}
+      - name: Run unit tests
+        run: go test -v -count=1 ./...
+        working-directory: services/${{ matrix.service }}
       - name: Security scan
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
@@ -105,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [employee-python-service, analytics-python-service, integration-service]
+        service: [employee-python-service, analytics-python-service, integration-service, ai-service, security-service, live-service, employee-lifecycle-service, workforce-planning-service]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -146,6 +149,15 @@ jobs:
             echo "INTERNAL_JWT_SECRET=test-secret" >> $GITHUB_ENV
           elif [[ "${{ matrix.service }}" == "integration-service" ]]; then
             echo "INTERNAL_API_KEY=test-key" >> $GITHUB_ENV
+            echo "DATABASE_URL=sqlite:///test.db" >> $GITHUB_ENV
+          elif [[ "${{ matrix.service }}" == "security-service" ]]; then
+            echo "DATABASE_URL=sqlite:///test.db" >> $GITHUB_ENV
+            echo "INTERNAL_API_KEY=test-key" >> $GITHUB_ENV
+          elif [[ "${{ matrix.service }}" == "live-service" ]]; then
+            echo "INTERNAL_JWT_SECRET=test-secret" >> $GITHUB_ENV
+          elif [[ "${{ matrix.service }}" == "employee-lifecycle-service" ]]; then
+            echo "DATABASE_URL=sqlite:///test.db" >> $GITHUB_ENV
+          elif [[ "${{ matrix.service }}" == "workforce-planning-service" ]]; then
             echo "DATABASE_URL=sqlite:///test.db" >> $GITHUB_ENV
           fi
       - name: Test Python
