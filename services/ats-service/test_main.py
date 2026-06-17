@@ -1,13 +1,37 @@
 """Tests for the ATS Service API using FastAPI TestClient."""
 
+import base64
+import hashlib
+import hmac
+import json
+import os
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from main import app
 
+os.environ.setdefault("INTERNAL_JWT_SECRET", "test-secret")
+INTERNAL_JWT_SECRET = "test-secret"
+
+
+def _make_internal_token(secret: str) -> str:
+    hdr = base64.urlsafe_b64encode(
+        json.dumps({"alg": "HS256", "typ": "JWT"}).encode()
+    ).rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"sub": "test", "exp": int(time.time()) + 3600}).encode()
+    ).rstrip(b"=").decode()
+    sig = base64.urlsafe_b64encode(
+        hmac.new(secret.encode(), f"{hdr}.{payload}".encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    return f"{hdr}.{payload}.{sig}"
+
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    token = _make_internal_token(INTERNAL_JWT_SECRET)
+    return TestClient(app, headers={"x-internal-auth": token})
 
 
 def test_health_check(client):
