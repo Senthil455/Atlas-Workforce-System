@@ -12,7 +12,11 @@ public class BankTransaction {
     private String tenantId;
     private Long payrollId;
     private Double amount;
+
+    @Convert(converter = EncryptedStringConverter.class)
     private String accountNumber;
+
+    @Convert(converter = EncryptedStringConverter.class)
     private String routingNumber;
     private String bankName;
     private String accountType;
