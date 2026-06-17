@@ -119,7 +119,7 @@ DATABASE_URL = os.environ.get(
 try:
     engine = create_engine(DATABASE_URL)
 except Exception as e:
-    print(f"Error creating engine: {e}")
+    logger.error("analytics.engine_creation_failed", extra={"error": str(e)})
     engine = None
 
 api_key = os.environ.get("OPENAI_API_KEY")
