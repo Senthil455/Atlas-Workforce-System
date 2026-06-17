@@ -25,25 +25,18 @@ export const options = {
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const AUTH_URL = __ENV.AUTH_URL || 'http://localhost:8010';
 
-function getToken() {
-  const payload = JSON.stringify({
+export default function () {
+  const loginPayload = JSON.stringify({
     email: 'admin@atlas.io',
     password: 'ChangeMe123!',
   });
-  const res = http.post(`${AUTH_URL}/login`, payload, {
+  const loginRes = http.post(`${AUTH_URL}/login`, loginPayload, {
     headers: { 'Content-Type': 'application/json' },
   });
-  if (res.status === 200) {
-    return res.json('token');
-  }
-  return null;
-}
-
-export default function () {
-  const token = getToken();
+  const token = loginRes.status === 200 ? loginRes.json('token') : null;
   check(token, { 'auth token obtained': (t) => t !== null });
-  loginDuration.add(token ? 1 : 0);
-  errorRate.add(!token);
+  loginDuration.add(loginRes.timings.duration);
+  errorRate.add(token ? 0 : 1);
 
   if (!token) {
     sleep(1);
