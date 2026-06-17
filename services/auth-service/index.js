@@ -1474,8 +1474,9 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       console.warn('SAML_IDP_CERT not configured — signature verification disabled');
     }
 
+    const doc = new DOMParser().parseFromString(decodedXml, 'text/xml');
+
     if (SAML_IDP_CERT) {
-      const doc = new DOMParser().parseFromString(decodedXml, 'text/xml');
       const signatureNodes = doc.getElementsByTagNameNS
         ? doc.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'Signature')
         : doc.getElementsByTagName('Signature');
@@ -1534,15 +1535,33 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       }
     }
 
-    const nameIdMatch = decodedXml.match(/<saml2:NameID[^>]*>([^<]+)<\/saml2:NameID>/);
-    const emailMatch = decodedXml.match(/<saml2:Attribute[^>]*?Name="[^"]*email[^"]*"[^>]*>[\s\S]*?<saml2:AttributeValue[^>]*>([^<]+)<\/saml2:AttributeValue>/i);
-    const firstNameMatch = decodedXml.match(/<saml2:Attribute[^>]*?Name="[^"]*firstName[^"]*"[^>]*>[\s\S]*?<saml2:AttributeValue[^>]*>([^<]+)<\/saml2:AttributeValue>/i);
-    const lastNameMatch = decodedXml.match(/<saml2:Attribute[^>]*?Name="[^"]*lastName[^"]*"[^>]*>[\s\S]*?<saml2:AttributeValue[^>]*>([^<]+)<\/saml2:AttributeValue>/i);
+    const ns = 'urn:oasis:names:tc:SAML:2.0:assertion';
 
-    const emailSimpleMatch = decodedXml.match(/<NameID[^>]*>([^<]+)<\/NameID>/);
-    const email = emailMatch?.[1] || nameIdMatch?.[1] || emailSimpleMatch?.[1];
-    const firstName = firstNameMatch?.[1] || '';
-    const lastName = lastNameMatch?.[1] || '';
+    let email = '';
+    const nameIdNodes = doc.getElementsByTagNameNS ? doc.getElementsByTagNameNS(ns, 'NameID') : doc.getElementsByTagName('NameID');
+    if (nameIdNodes.length > 0) {
+      email = nameIdNodes[0].textContent || '';
+    }
+
+    let firstName = '';
+    let lastName = '';
+
+    const attrNodes = doc.getElementsByTagNameNS ? doc.getElementsByTagNameNS(ns, 'Attribute') : doc.getElementsByTagName('Attribute');
+    for (let i = 0; i < attrNodes.length; i++) {
+      const name = attrNodes[i].getAttribute('Name') || '';
+      const valNodes = attrNodes[i].getElementsByTagNameNS
+        ? attrNodes[i].getElementsByTagNameNS(ns, 'AttributeValue')
+        : attrNodes[i].getElementsByTagName('AttributeValue');
+      const value = valNodes.length > 0 ? (valNodes[0].textContent || '') : '';
+      const lower = name.toLowerCase();
+      if (lower.includes('email') && !email) {
+        email = value;
+      } else if (lower.includes('firstname') || lower.includes('givenname')) {
+        firstName = value;
+      } else if (lower.includes('lastname') || lower.includes('surname')) {
+        lastName = value;
+      }
+    }
     const displayName = `${firstName} ${lastName}`.trim() || email;
 
     if (!email) {
