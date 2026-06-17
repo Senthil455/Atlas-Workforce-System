@@ -2,10 +2,12 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -23,6 +25,26 @@ class ObservabilityConfig:
 
 def get_correlation_id() -> str:
     return correlation_id_ctx.get()
+
+
+_URL_CREDENTIALS_RE = re.compile(r"://([^:]+):([^@]+)@")
+
+
+def sanitize_url(url: str) -> str:
+    if not url:
+        return url
+    try:
+        parsed = urlparse(url)
+        if parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            if parsed.username:
+                netloc = f"{parsed.username}:****@{netloc}"
+            return urlunparse(parsed._replace(netloc=netloc))
+        return url
+    except Exception:
+        return _URL_CREDENTIALS_RE.sub(r"://\1:****@", url)
 
 
 class CorrelationIdMiddleware(BaseHTTPMiddleware):

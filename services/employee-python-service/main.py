@@ -17,7 +17,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import pymongo.errors
 from contextlib import asynccontextmanager
 import pika
-from atlas_observability import AtlasMetricsMiddleware, SecurityHeadersMiddleware
+from atlas_observability import AtlasMetricsMiddleware, SecurityHeadersMiddleware, sanitize_url
 
 # ------------------------------------------------
 # Structured Logger
@@ -81,21 +81,9 @@ SEARCH_MAX_LENGTH = 200
 SEARCH_ALLOWED_CHARS = re.compile(r"^[a-zA-Z0-9 @._\-]+$")
 
 
-def sanitize_mongo_url(url: str) -> str:
-    from urllib.parse import urlparse, urlunparse
-    parsed = urlparse(url)
-    if parsed.password:
-        netloc = parsed.hostname
-        if parsed.port:
-            netloc = f"{parsed.hostname}:{parsed.port}"
-        parsed = parsed._replace(netloc=f"{parsed.username}:****@{netloc}" if parsed.username else netloc)
-        return urlunparse(parsed)
-    return url
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log_event("info", "service.starting", mongo_url=sanitize_mongo_url(MONGO_URL))
+    log_event("info", "service.starting", mongo_url=sanitize_url(MONGO_URL))
     try:
         await employees_collection.create_index("email", unique=True)
         await employees_collection.create_index("name")
