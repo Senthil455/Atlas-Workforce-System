@@ -88,6 +88,7 @@ type Client struct {
 	conn     *websocket.Conn
 	send     chan []byte
 	tenantID string
+	clientIP string
 }
 
 type BroadcastMessage struct {
@@ -141,11 +142,16 @@ func (s *NotificationStore) MarkRead(ids []string) {
 	}
 }
 
+const maxClients = 1000
+const maxConnsPerIP = 10
+
 var (
-	store     = &NotificationStore{}
-	clients   = make(map[*Client]bool)
-	broadcast = make(chan BroadcastMessage)
-	mutex     = &sync.Mutex{}
+	store         = &NotificationStore{}
+	clients       = make(map[*Client]bool)
+	broadcast     = make(chan BroadcastMessage)
+	mutex         = &sync.Mutex{}
+	ipConnections = make(map[string]int)
+	ipMutex       = &sync.Mutex{}
 )
 
 type wsClaims struct {
@@ -257,6 +263,7 @@ func (c *Client) readPump() {
 		delete(clients, c)
 		close(c.send)
 		mutex.Unlock()
+		releaseConnection(c.clientIP)
 		c.conn.Close()
 	}()
 
@@ -279,6 +286,26 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "Notification Service is running"})
 }
 
+func canAcceptConnection(ip string) bool {
+	ipMutex.Lock()
+	defer ipMutex.Unlock()
+	count := ipConnections[ip]
+	if count >= maxConnsPerIP {
+		return false
+	}
+	ipConnections[ip] = count + 1
+	return true
+}
+
+func releaseConnection(ip string) {
+	ipMutex.Lock()
+	defer ipMutex.Unlock()
+	ipConnections[ip]--
+	if ipConnections[ip] <= 0 {
+		delete(ipConnections, ip)
+	}
+}
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	tokenStr := r.URL.Query().Get("token")
 	if tokenStr == "" {
@@ -297,13 +324,33 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		tenantID = "default"
 	}
 
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket Upgrade Error: %v", err)
+	clientIP := r.RemoteAddr
+	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+		clientIP = clientIP[:idx]
+	}
+
+	if !canAcceptConnection(clientIP) {
+		http.Error(w, `{"error":"Too many connections from this IP"}`, http.StatusTooManyRequests)
 		return
 	}
 
-	client := &Client{conn: ws, send: make(chan []byte, 256), tenantID: tenantID}
+	mutex.Lock()
+	if len(clients) >= maxClients {
+		mutex.Unlock()
+		releaseConnection(clientIP)
+		http.Error(w, `{"error":"Server at maximum connection capacity"}`, http.StatusServiceUnavailable)
+		return
+	}
+	mutex.Unlock()
+
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket Upgrade Error: %v", err)
+		releaseConnection(clientIP)
+		return
+	}
+
+	client := &Client{conn: ws, send: make(chan []byte, 256), tenantID: tenantID, clientIP: clientIP}
 
 	mutex.Lock()
 	clients[client] = true
