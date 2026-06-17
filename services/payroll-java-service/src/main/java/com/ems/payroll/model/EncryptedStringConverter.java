@@ -15,7 +15,6 @@ public class EncryptedStringConverter implements AttributeConverter<String, Stri
 
     private static final String ALGORITHM = "AES/ECB/PKCS5Padding";
     private static final String ENV_KEY = "BANK_ENCRYPTION_KEY";
-    private static final String FALLBACK_KEY = "CHANGE-ME-32-CHAR-KEY-FOR-PROD!!";
 
     private static SecretKeySpec keySpec;
 
@@ -23,7 +22,7 @@ public class EncryptedStringConverter implements AttributeConverter<String, Stri
         if (keySpec == null) {
             String raw = System.getenv(ENV_KEY);
             if (raw == null || raw.isEmpty()) {
-                raw = FALLBACK_KEY;
+                throw new IllegalStateException("BANK_ENCRYPTION_KEY environment variable is not set");
             }
             byte[] keyBytes;
             if (raw.length() == 32) {
