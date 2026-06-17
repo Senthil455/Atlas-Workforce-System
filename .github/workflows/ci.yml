@@ -170,6 +170,10 @@ jobs:
       - name: Install atlas-common dependency
         run: mvn install -DskipTests
         working-directory: services/atlas-common
+      - name: Set test environment variables
+        run: |
+          echo "SPRING_DATASOURCE_PASSWORD=test" >> $GITHUB_ENV
+          echo "INTERNAL_JWT_SECRET=test-secret" >> $GITHUB_ENV
       - name: Compile and test
         run: mvn clean test
         working-directory: services/${{ matrix.service }}
