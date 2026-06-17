@@ -383,9 +383,10 @@ func handleMessages(ctx context.Context) {
 // REST API handlers
 
 func listNotificationsHandler(w http.ResponseWriter, r *http.Request) {
-	tenantID := r.URL.Query().Get("tenant_id")
+	tenantID := r.Header.Get("X-Tenant-Id")
 	if tenantID == "" {
-		tenantID = r.Header.Get("X-Tenant-Id")
+		http.Error(w, `{"error":"Missing tenant context"}`, http.StatusForbidden)
+		return
 	}
 	notifications := store.List(tenantID)
 	w.Header().Set("Content-Type", "application/json")
