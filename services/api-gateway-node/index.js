@@ -816,6 +816,23 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/metrics', async (req, res) => {
-  res.set('Content-Type', promClient.register.contentType);
-  res.end(await promClient.register.metrics());
+	res.set('Content-Type', promClient.register.contentType);
+	res.end(await promClient.register.metrics());
+});
+
+function globalErrorHandler(err, req, res, _next) {
+	console.error('Unhandled error:', err.message, err.stack);
+	const status = err.status || err.statusCode || 500;
+	res.status(status).json({ error: 'Internal server error' });
+}
+app.use(globalErrorHandler);
+
+process.on('SIGTERM', () => {
+	console.log('SIGTERM received, shutting down gracefully...');
+	server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+	console.log('SIGINT received, shutting down gracefully...');
+	server.close(() => process.exit(0));
 });
