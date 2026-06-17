@@ -520,7 +520,9 @@ async def sse_executive(request: Request): return await sse_channel("executive",
 
 async def verify_ws_token(websocket: WebSocket, token: Optional[str] = None) -> bool:
     auth_header = websocket.headers.get("x-internal-auth")
-    token_str = token or auth_header
+    bearer_header = websocket.headers.get("authorization", "")
+    bearer_token = bearer_header.removeprefix("Bearer ").strip() if bearer_header else None
+    token_str = token or auth_header or bearer_token
     if not token_str:
         await websocket.close(code=4001, reason="Missing authentication token")
         return False
