@@ -28,8 +28,12 @@ public class EncryptedStringConverter implements AttributeConverter<String, Stri
             if (raw.length() == 32) {
                 keyBytes = raw.getBytes(StandardCharsets.UTF_8);
             } else {
-                MessageDigest sha = MessageDigest.getInstance("SHA-256");
-                keyBytes = Arrays.copyOf(sha.digest(raw.getBytes(StandardCharsets.UTF_8)), 32);
+                try {
+                    MessageDigest sha = MessageDigest.getInstance("SHA-256");
+                    keyBytes = Arrays.copyOf(sha.digest(raw.getBytes(StandardCharsets.UTF_8)), 32);
+                } catch (java.security.NoSuchAlgorithmException e) {
+                    throw new RuntimeException("SHA-256 not available", e);
+                }
             }
             keySpec = new SecretKeySpec(keyBytes, "AES");
         }
