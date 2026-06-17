@@ -38,13 +38,19 @@ clean:
 
 test:
 	@echo "Running all backend tests..."
-	cd services/api-gateway-node && npm test || true
-	cd services/auth-service && npm test || true
-	cd services/employee-python-service && python -m pytest -v || true
-	cd services/analytics-python-service && python -m pytest -v || true
-	cd services/payroll-java-service && mvn test || true
-	cd services/leave-service && mvn test || true
-	@echo "All backend tests completed."
+	@failed=0; \
+	cd services/api-gateway-node && npm test || failed=1; \
+	cd services/auth-service && npm test || failed=1; \
+	cd services/employee-python-service && python -m pytest -v || failed=1; \
+	cd services/analytics-python-service && python -m pytest -v || failed=1; \
+	cd services/payroll-java-service && mvn test || failed=1; \
+	cd services/leave-service && mvn test || failed=1; \
+	if [ $$failed -ne 0 ]; then \
+		echo ""; \
+		echo "FAILURE: Some backend tests failed."; \
+		exit 1; \
+	fi; \
+	echo "All backend tests completed."
 
 test-e2e:
 	@echo "Running Playwright End-to-End test suite..."
