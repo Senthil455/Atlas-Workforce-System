@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/gofiber/adaptor/v2"
@@ -111,7 +114,7 @@ func initRabbitMQ() {
 	}
 }
 
-func consumeEmployeeDeletions() {
+func consumeEmployeeDeletions(ctx context.Context) {
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
@@ -185,18 +188,27 @@ func consumeEmployeeDeletions() {
 	}
 
 	log.Printf("Employee deletion consumer started on notifications_exchange")
-	for msg := range msgs {
-		var event struct {
-			Event    string `json:"event"`
-			Email    string `json:"email"`
-			TenantID string `json:"tenant_id"`
-		}
-		if err := json.Unmarshal(msg.Body, &event); err != nil {
-			log.Printf("Warning: Could not parse deletion event (%v)", err)
-			continue
-		}
-		if event.Event == "employee.deleted" {
-			handleEmployeeDeletion(event.TenantID, event.Email)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Employee deletion consumer shutting down")
+			return
+		case msg, ok := <-msgs:
+			if !ok {
+				return
+			}
+			var event struct {
+				Event    string `json:"event"`
+				Email    string `json:"email"`
+				TenantID string `json:"tenant_id"`
+			}
+			if err := json.Unmarshal(msg.Body, &event); err != nil {
+				log.Printf("Warning: Could not parse deletion event (%v)", err)
+				continue
+			}
+			if event.Event == "employee.deleted" {
+				handleEmployeeDeletion(event.TenantID, event.Email)
+			}
 		}
 	}
 }
@@ -268,9 +280,12 @@ func publishEvent(routingKey, tenantID string, record AttendanceRecord) {
 }
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	initDatabase()
 	initRabbitMQ()
-	go consumeEmployeeDeletions()
+	go consumeEmployeeDeletions(ctx)
 
 	app := fiber.New(fiber.Config{
 		AppName: "Atlas Attendance Service",
@@ -412,6 +427,22 @@ func main() {
 		port = "8005"
 	}
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		log.Println("Shutting down attendance service...")
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+			log.Printf("Server shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("Atlas Attendance Service v2.0 listening on port %s", port)
-	app.Listen(":" + port)
+	if err := app.Listen(":" + port); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
 }

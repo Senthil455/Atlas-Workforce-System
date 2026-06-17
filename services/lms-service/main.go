@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/atlas-workforce/lms-service/handlers"
@@ -139,7 +142,10 @@ func main() {
 	app.Use(middleware.AuthMiddleware())
 	app.Use(middleware.TenantMiddleware())
 
-	go startCertExpiryChecker()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go startCertExpiryChecker(ctx)
 
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "LMS Service is running"})
@@ -148,6 +154,21 @@ func main() {
 	setupRoutes(app)
 
 	log.Printf("LMS Service starting on port %s", serverPort)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		log.Println("Shutting down LMS service...")
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+			log.Printf("Server shutdown error: %v", err)
+		}
+	}()
+
 	if err := app.Listen(":" + serverPort); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
@@ -160,15 +181,19 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func startCertExpiryChecker() {
+func startCertExpiryChecker(ctx context.Context) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
-	// Run once at startup
 	checkExpiringCertifications()
 
-	for range ticker.C {
-		checkExpiringCertifications()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkExpiringCertifications()
+		}
 	}
 }
 
