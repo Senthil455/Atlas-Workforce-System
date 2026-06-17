@@ -151,4 +151,48 @@ spec:
   ports:
   - port: 8015
     targetPort: 8015
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: integration-service
+spec:
+  selector:
+    app: integration-service
+  ports:
+  - port: 8016
+    targetPort: 8016
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: employee-lifecycle-service
+spec:
+  selector:
+    app: employee-lifecycle-service
+  ports:
+  - port: 8020
+    targetPort: 8020
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: security-service
+spec:
+  selector:
+    app: security-service
+  ports:
+  - port: 8050
+    targetPort: 8050
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+spec:
+  selector:
+    app: ai-service
+  ports:
+  - port: 8065
+    targetPort: 8065
 
