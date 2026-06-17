@@ -494,7 +494,8 @@ async function initDB() {
       user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       mfa_secret VARCHAR(255) NOT NULL,
       backup_codes JSONB DEFAULT '[]'::jsonb,
-      mfa_enabled BOOLEAN DEFAULT false
+      mfa_enabled BOOLEAN DEFAULT false,
+      backup_codes_shown BOOLEAN DEFAULT false
     );
   `);
 
@@ -883,25 +884,67 @@ app.post('/mfa/setup', requireRole(), createUserRateLimiter('mfa_setup', 5), asy
     const secret = authenticator.generateSecret();
     const backupCodes = Array.from({ length: 10 }, () => crypto.randomBytes(5).toString('hex').slice(0, 8).toUpperCase());
 
+    const existing = await pool.query('SELECT backup_codes_shown FROM user_mfa WHERE user_id = $1', [userId]);
+    const alreadyShown = existing.rows[0]?.backup_codes_shown === true;
+
     await pool.query(`
       INSERT INTO user_mfa (user_id, mfa_secret, backup_codes, mfa_enabled)
       VALUES ($1, $2, $3::jsonb, false)
       ON CONFLICT (user_id) DO UPDATE SET
         mfa_secret = EXCLUDED.mfa_secret,
         backup_codes = EXCLUDED.backup_codes,
-        mfa_enabled = false
+        mfa_enabled = false,
+        backup_codes_shown = false
     `, [userId, secret, JSON.stringify(backupCodes)]);
 
     const otpauth = authenticator.keyuri(req.user.email, 'Atlas Workforce', secret);
 
-    res.json({
-      secret,
-      qr_code_uri: otpauth,
-      backup_codes: backupCodes
-    });
+    const response = { secret, qr_code_uri: otpauth };
+    if (alreadyShown) {
+      response.message = 'Backup codes were regenerated. Use /mfa/rotate-backup-codes to view new codes with re-authentication.';
+    } else {
+      await pool.query('UPDATE user_mfa SET backup_codes_shown = true WHERE user_id = $1', [userId]);
+      response.backup_codes = backupCodes;
+      response.message = 'Save these backup codes. They will not be shown again.';
+    }
+
+    res.json(response);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'MFA setup failed' });
+  }
+});
+
+app.post('/mfa/rotate-backup-codes', requireRole(), createUserRateLimiter('mfa_verify', 5), async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ message: 'Current TOTP token is required to rotate backup codes' });
+    }
+
+    const userId = req.user.id;
+    const result = await pool.query('SELECT * FROM user_mfa WHERE user_id = $1', [userId]);
+    if (!result.rows[0]) {
+      return res.status(400).json({ message: 'MFA not set up' });
+    }
+
+    const isValid = authenticator.check(token, result.rows[0].mfa_secret);
+    if (!isValid) {
+      return res.status(400).json({ message: 'Invalid token' });
+    }
+
+    const newCodes = Array.from({ length: 10 }, () => crypto.randomBytes(5).toString('hex').slice(0, 8).toUpperCase());
+
+    await pool.query(`
+      UPDATE user_mfa SET backup_codes = $1::jsonb, backup_codes_shown = true WHERE user_id = $2
+    `, [JSON.stringify(newCodes), userId]);
+
+    await sendAuditEvent('auth.mfa_rotate_codes', userId, req.user.email);
+
+    res.json({ message: 'Backup codes rotated successfully. Save these codes as they will not be shown again.', backup_codes: newCodes });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Failed to rotate backup codes' });
   }
 });
 
