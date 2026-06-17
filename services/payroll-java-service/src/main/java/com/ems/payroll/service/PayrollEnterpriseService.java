@@ -2,6 +2,8 @@ package com.ems.payroll.service;
 
 import com.ems.payroll.model.*;
 import com.ems.payroll.repository.*;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -12,6 +14,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class PayrollEnterpriseService {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final EnhancedPayrollRepository payrollRepo;
     private final CountryTaxConfigRepository taxConfigRepo;
@@ -139,7 +143,17 @@ public class PayrollEnterpriseService {
             outboxEvent.setAggregateType("payroll");
             outboxEvent.setAggregateId(String.valueOf(record.getId()));
             outboxEvent.setEventType("PAYROLL_PROCESSED");
-            outboxEvent.setPayload("{\"payrollId\":" + record.getId() + ",\"employeeId\":\"" + employeeId + "\",\"period\":\"" + period + "\",\"grossAmount\":" + grossSalary + ",\"netAmount\":" + netSalary + ",\"currency\":\"" + (currency != null ? currency : "USD") + "\",\"status\":\"PROCESSED\",\"timestamp\":\"" + LocalDateTime.now() + "\",\"tenantId\":\"" + tenantId + "\"}");
+            outboxEvent.setPayload(toJson(Map.of(
+                "payrollId", record.getId(),
+                "employeeId", employeeId,
+                "period", period,
+                "grossAmount", grossSalary,
+                "netAmount", netSalary,
+                "currency", currency != null ? currency : "USD",
+                "status", "PROCESSED",
+                "timestamp", LocalDateTime.now().toString(),
+                "tenantId", tenantId
+            )));
             outboxEvent.setStatus("PENDING");
             outboxEvent.setRetryCount(0);
             outboxEvent.setCreatedAt(LocalDateTime.now());
@@ -151,7 +165,13 @@ public class PayrollEnterpriseService {
             outboxEvent.setAggregateType("payroll");
             outboxEvent.setAggregateId("0");
             outboxEvent.setEventType("PAYROLL_FAILED");
-            outboxEvent.setPayload("{\"employeeId\":\"" + employeeId + "\",\"period\":\"" + period + "\",\"error\":\"" + e.getMessage() + "\",\"timestamp\":\"" + LocalDateTime.now() + "\",\"tenantId\":\"" + tenantId + "\"}");
+            outboxEvent.setPayload(toJson(Map.of(
+                "employeeId", employeeId,
+                "period", period,
+                "error", e.getMessage(),
+                "timestamp", LocalDateTime.now().toString(),
+                "tenantId", tenantId
+            )));
             outboxEvent.setStatus("PENDING");
             outboxEvent.setRetryCount(0);
             outboxEvent.setCreatedAt(LocalDateTime.now());
@@ -950,5 +970,13 @@ public class PayrollEnterpriseService {
 
     public List<Payslip> getEmployeePayslips(String tenantId, String employeeId) {
         return payslipRepo.findByTenantIdAndEmployeeId(tenantId, employeeId);
+    }
+
+    private static String toJson(Map<String, Object> payload) {
+        try {
+            return MAPPER.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize outbox payload", e);
+        }
     }
 }
