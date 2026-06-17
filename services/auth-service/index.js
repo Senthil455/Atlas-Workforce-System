@@ -1652,9 +1652,7 @@ app.post('/auth/passwordless/request', createUserRateLimiter('passwordless_reque
     await sendAuditEvent('auth.passwordless_requested', user.id, email);
 
     res.json({
-      message: 'Magic link sent',
-      token,
-      expires_in: 900
+      message: 'Check your email for the login link'
     });
   } catch (err) {
     console.error(err);
