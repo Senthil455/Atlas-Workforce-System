@@ -11,7 +11,7 @@ groups:
           description: "{{ $labels.job }} has been unreachable for more than 30 seconds."
 
       - alert: HighErrorRate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        expr: sum by (job) (rate(atlas_http_requests_total{status_code=~"5[0-9][0-9]"}[5m])) / sum by (job) (rate(atlas_http_requests_total[5m])) > 0.05
         for: 1m
         labels:
           severity: warning
@@ -19,11 +19,94 @@ groups:
           summary: "High error rate on {{ $labels.job }}"
           description: "Error rate on {{ $labels.job }} is {{ $value | humanizePercentage }}"
 
-      - alert: HighMemoryUsage
-        expr: process_resident_memory_bytes / process_virtual_memory_bytes > 0.9
+      - alert: HighLatencyP99
+        expr: histogram_quantile(0.99, sum by (job, le) (rate(atlas_http_request_duration_seconds_bucket[5m]))) > 1.0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "High memory usage on {{ $labels.job }}"
-          description: "{{ $labels.job }} memory usage is above 90%"
+          summary: "High p99 latency on {{ $labels.job }}"
+          description: "p99 latency on {{ $labels.job }} is {{ $value | humanizeDuration }}"
+
+      - alert: HighLatencyP99Critical
+        expr: histogram_quantile(0.99, sum by (job, le) (rate(atlas_http_request_duration_seconds_bucket[5m]))) > 2.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical p99 latency on {{ $labels.job }}"
+          description: "p99 latency on {{ $labels.job }} is {{ $value | humanizeDuration }}"
+
+      - alert: HighInProgressRequests
+        expr: sum by (job) (atlas_http_requests_in_progress) > 100
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High in-flight requests on {{ $labels.job }}"
+          description: "{{ $labels.job }} has {{ $value }} requests in progress"
+
+  - name: atlas_infrastructure
+    rules:
+      - alert: DiskSpaceWarning
+        expr: (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space low on {{ $labels.device }}"
+          description: "Disk space on {{ $labels.device }} ({{ $labels.mountpoint }}) is {{ $value | humanizePercentage }} available"
+
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"}) < 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space critical on {{ $labels.device }}"
+          description: "Disk space on {{ $labels.device }} ({{ $labels.mountpoint }}) is {{ $value | humanizePercentage }} available"
+
+      - alert: NodeMemoryUsageWarning
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node memory usage above 90%"
+          description: "Memory usage on {{ $labels.instance }} is {{ $value | humanizePercentage }}"
+
+      - alert: NodeMemoryUsageCritical
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node memory usage above 95%"
+          description: "Memory usage on {{ $labels.instance }} is {{ $value | humanizePercentage }}"
+
+      - alert: NodeCPUUsageHigh
+        expr: (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage above 80% on {{ $labels.instance }}"
+          description: "CPU usage on {{ $labels.instance }} is {{ $value | humanizePercentage }}"
+
+      - alert: TLSCertExpiryWarning
+        expr: probe_ssl_earliest_cert_expiry - time() < 86400 * 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expires in {{ $value | humanizeDuration }}"
+          description: "TLS certificate for {{ $labels.target }} expires in {{ $value | humanizeDuration }}"
+
+      - alert: TLSCertExpiryCritical
+        expr: probe_ssl_earliest_cert_expiry - time() < 86400 * 7
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS certificate expires in {{ $value | humanizeDuration }}"
+          description: "TLS certificate for {{ $labels.target }} expires in less than 7 days"
