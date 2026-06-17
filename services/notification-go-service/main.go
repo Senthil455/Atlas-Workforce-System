@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -310,20 +313,23 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	client.readPump()
 }
 
-func handleMessages() {
+func handleMessages(ctx context.Context) {
 	for {
-		msg := <-broadcast
-		mutex.Lock()
-		for client := range clients {
-			if client.tenantID == msg.TenantID {
-				select {
-				case client.send <- msg.Payload:
-				default:
-					// skip slow client
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-broadcast:
+			mutex.Lock()
+			for client := range clients {
+				if client.tenantID == msg.TenantID {
+					select {
+					case client.send <- msg.Payload:
+					default:
+					}
 				}
 			}
+			mutex.Unlock()
 		}
-		mutex.Unlock()
 	}
 }
 
@@ -356,7 +362,7 @@ func markReadHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func setupRabbitMQConsumer() {
+func setupRabbitMQConsumer(ctx context.Context) {
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
@@ -439,8 +445,17 @@ func setupRabbitMQConsumer() {
 	}
 
 	log.Println("Waiting for messages from RabbitMQ...")
-	for d := range msgs {
-		processMessage(d.Body)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("RabbitMQ consumer shutting down")
+			return
+		case d, ok := <-msgs:
+			if !ok {
+				return
+			}
+			processMessage(d.Body)
+		}
 	}
 }
 
@@ -527,21 +542,20 @@ func main() {
 		port = "8004"
 	}
 
-	go handleMessages()
-	go setupRabbitMQConsumer()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handleMessages(ctx)
+	go setupRabbitMQConsumer(ctx)
 
 	mux := http.NewServeMux()
 
-	// Metrics
 	mux.Handle("/metrics", promhttp.Handler())
 
-	// Health
 	mux.HandleFunc("/health", healthHandler)
 
-	// WebSocket
 	mux.HandleFunc("/ws", handleConnections)
 
-	// REST API for notifications (requires internal auth)
 	mux.HandleFunc("/api/notifications", internalAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -562,8 +576,28 @@ func main() {
 		}
 	}))
 
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: metricsMiddleware(mux),
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		log.Println("Shutting down notification service...")
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("Notification Service listening on port %s", port)
-	if err := http.ListenAndServe(":"+port, metricsMiddleware(mux)); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+	<-ctx.Done()
 }
