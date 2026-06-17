@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"os"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
@@ -50,6 +51,10 @@ func AuthMiddleware() fiber.Handler {
 		claims, ok := token.Claims.(*internalClaims)
 		if !ok {
 			return c.Status(401).JSON(fiber.Map{"error": "Invalid token claims"})
+		}
+
+		if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(time.Now()) {
+			return c.Status(401).JSON(fiber.Map{"error": "Token has expired"})
 		}
 
 		userID := claims.UserID
