@@ -120,94 +120,102 @@ func consumeEmployeeDeletions(ctx context.Context) {
 		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
 	}
 
-	conn, err := amqp.Dial(rabbitURL)
-	if err != nil {
-		log.Printf("Warning: Could not connect to RabbitMQ for deletion consumer (%v)", err)
-		return
-	}
-	defer conn.Close()
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
 
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Printf("Warning: Could not open channel for deletion consumer (%v)", err)
-		return
-	}
-	defer ch.Close()
-
-	err = ch.ExchangeDeclare(
-		"notifications_exchange",
-		"fanout",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Warning: Could not declare notifications_exchange (%v)", err)
-		return
-	}
-
-	q, err := ch.QueueDeclare(
-		"",
-		false,
-		false,
-		true,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Warning: Could not declare queue (%v)", err)
-		return
-	}
-
-	err = ch.QueueBind(
-		q.Name,
-		"",
-		"notifications_exchange",
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Warning: Could not bind queue (%v)", err)
-		return
-	}
-
-	msgs, err := ch.Consume(
-		q.Name,
-		"",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Warning: Could not start consuming (%v)", err)
-		return
-	}
-
-	log.Printf("Employee deletion consumer started on notifications_exchange")
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Employee deletion consumer shutting down")
 			return
-		case msg, ok := <-msgs:
-			if !ok {
+		default:
+		}
+
+		conn, err := amqp.Dial(rabbitURL)
+		if err != nil {
+			log.Printf("Warning: Could not connect to RabbitMQ for deletion consumer (%v), retrying in %v", err, backoff)
+			time.Sleep(backoff)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		backoff = 1 * time.Second
+
+		ch, err := conn.Channel()
+		if err != nil {
+			log.Printf("Warning: Could not open channel (%v), reconnecting", err)
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		err = ch.ExchangeDeclare("notifications_exchange", "fanout", true, false, false, false, nil)
+		if err != nil {
+			log.Printf("Warning: Could not declare exchange (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		q, err := ch.QueueDeclare("", false, false, true, false, nil)
+		if err != nil {
+			log.Printf("Warning: Could not declare queue (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		err = ch.QueueBind(q.Name, "", "notifications_exchange", false, nil)
+		if err != nil {
+			log.Printf("Warning: Could not bind queue (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+		if err != nil {
+			log.Printf("Warning: Could not start consuming (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		log.Printf("Employee deletion consumer started on notifications_exchange")
+
+	consumeLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("Employee deletion consumer shutting down")
+				ch.Close()
+				conn.Close()
 				return
-			}
-			var event struct {
-				Event    string `json:"event"`
-				Email    string `json:"email"`
-				TenantID string `json:"tenant_id"`
-			}
-			if err := json.Unmarshal(msg.Body, &event); err != nil {
-				log.Printf("Warning: Could not parse deletion event (%v)", err)
-				continue
-			}
-			if event.Event == "employee.deleted" {
-				handleEmployeeDeletion(event.TenantID, event.Email)
+			case msg, ok := <-msgs:
+				if !ok {
+					log.Printf("RabbitMQ connection lost for deletion consumer, reconnecting")
+					ch.Close()
+					conn.Close()
+					break consumeLoop
+				}
+				var event struct {
+					Event    string `json:"event"`
+					Email    string `json:"email"`
+					TenantID string `json:"tenant_id"`
+				}
+				if err := json.Unmarshal(msg.Body, &event); err != nil {
+					log.Printf("Warning: Could not parse deletion event (%v)", err)
+					continue
+				}
+				if event.Event == "employee.deleted" {
+					handleEmployeeDeletion(event.TenantID, event.Email)
+				}
 			}
 		}
 	}

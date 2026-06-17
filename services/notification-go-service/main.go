@@ -368,93 +368,92 @@ func setupRabbitMQConsumer(ctx context.Context) {
 		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
 	}
 
-	var conn *amqp.Connection
-	var err error
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
 
-	for i := 0; i < 5; i++ {
-		conn, err = amqp.Dial(rabbitURL)
-		if err == nil {
-			break
-		}
-		log.Printf("Failed to connect to RabbitMQ, retrying... (%v)", err)
-		time.Sleep(5 * time.Second)
-	}
-
-	if err != nil {
-		log.Printf("Could not connect to RabbitMQ: %v", err)
-		return
-	}
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Printf("Failed to open a channel: %v", err)
-		return
-	}
-
-	err = ch.ExchangeDeclare(
-		"notifications_exchange",
-		"fanout",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Failed to declare an exchange: %v", err)
-		return
-	}
-
-	q, err := ch.QueueDeclare(
-		"",    // empty name generates a unique temporary queue name
-		false, // non-durable
-		false, // delete when unused
-		true,  // exclusive
-		false, // no-wait
-		nil,   // arguments
-	)
-	if err != nil {
-		log.Printf("Failed to declare a queue: %v", err)
-		return
-	}
-
-	err = ch.QueueBind(
-		q.Name,
-		"",
-		"notifications_exchange",
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Failed to bind queue: %v", err)
-		return
-	}
-
-	msgs, err := ch.Consume(
-		q.Name,
-		"",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Failed to register a consumer: %v", err)
-		return
-	}
-
-	log.Println("Waiting for messages from RabbitMQ...")
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("RabbitMQ consumer shutting down")
 			return
-		case d, ok := <-msgs:
-			if !ok {
-				return
+		default:
+		}
+
+		conn, err := amqp.Dial(rabbitURL)
+		if err != nil {
+			log.Printf("Failed to connect to RabbitMQ (%v), retrying in %v", err, backoff)
+			time.Sleep(backoff)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
 			}
-			processMessage(d.Body)
+			continue
+		}
+
+		backoff = 1 * time.Second
+
+		ch, err := conn.Channel()
+		if err != nil {
+			log.Printf("Failed to open channel (%v), reconnecting", err)
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		err = ch.ExchangeDeclare("notifications_exchange", "fanout", true, false, false, false, nil)
+		if err != nil {
+			log.Printf("Failed to declare exchange (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		q, err := ch.QueueDeclare("", false, false, true, false, nil)
+		if err != nil {
+			log.Printf("Failed to declare queue (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		err = ch.QueueBind(q.Name, "", "notifications_exchange", false, nil)
+		if err != nil {
+			log.Printf("Failed to bind queue (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+		if err != nil {
+			log.Printf("Failed to register consumer (%v), reconnecting", err)
+			ch.Close()
+			conn.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		log.Println("Waiting for messages from RabbitMQ...")
+
+	consumeLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("RabbitMQ consumer shutting down")
+				ch.Close()
+				conn.Close()
+				return
+			case d, ok := <-msgs:
+				if !ok {
+					log.Printf("RabbitMQ connection lost, reconnecting")
+					ch.Close()
+					conn.Close()
+					break consumeLoop
+				}
+				processMessage(d.Body)
+			}
 		}
 	}
 }
