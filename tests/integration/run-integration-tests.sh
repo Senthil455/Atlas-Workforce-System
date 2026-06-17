@@ -399,10 +399,12 @@ TESTS+=("Query audit logs")
 AUDIT_LOGS=$(curl -sf "$AUDIT_SERVICE_URL/api/v1/audit/logs?page=1&page_size=5" \
   -H "X-Internal-Key: $AUDIT_KEY") || AUDIT_LOGS=""
 AUDIT_COUNT=$(echo "$AUDIT_LOGS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('items',d.get('results',[]))))" 2>/dev/null) || AUDIT_COUNT="0"
-if [ "$AUDIT_COUNT" -ge 0 ] 2>/dev/null; then
-  report_pass "Query audit logs ($AUDIT_COUNT entries)"
+if [ "$AUDIT_COUNT" -gt 0 ]; then
+  echo "  ${GREEN}PASS${NC}  Found $AUDIT_COUNT audit log entries"
+  PASS=$((PASS + 1))
 else
-  report_fail "Query audit logs"
+  echo "  ${RED}FAIL${NC}  No audit log entries found (expected at least 1)"
+  exit 1
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
