@@ -52,8 +52,8 @@ def log_event(level: str, event: str, **kwargs):
 # ------------------------------------------------
 # Configuration
 # ------------------------------------------------
-MONGO_USER = os.environ["MONGO_USER"]
-MONGO_PASSWORD = os.environ["MONGO_PASSWORD"]
+MONGO_USER = os.environ.get("MONGO_USER", "")
+MONGO_PASSWORD = os.environ.get("MONGO_PASSWORD", "")
 MONGO_HOST = os.environ.get("MONGO_HOST", "localhost")
 MONGO_DB = os.environ.get("MONGO_DB", "atlas_db")
 MONGO_URL = os.environ.get(
@@ -62,11 +62,11 @@ MONGO_URL = os.environ.get(
 )
 DB_NAME = "atlas_db"
 
-INTERNAL_KEY = os.environ["INTERNAL_KEY"]
+INTERNAL_KEY = os.environ.get("INTERNAL_KEY", "")
 
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
 RABBITMQ_PORT = int(os.environ.get("RABBITMQ_PORT", "5672"))
-RABBITMQ_USER = os.environ["RABBITMQ_USER"]
+RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "guest")
 RABBITMQ_PASSWORD = os.environ["RABBITMQ_PASSWORD"]
 
 client = AsyncIOMotorClient(MONGO_URL)
