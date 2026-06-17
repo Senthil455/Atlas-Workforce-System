@@ -46,6 +46,8 @@ services:
     user: "1001:1001"
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     networks:
       - atlas-network
 
@@ -58,6 +60,8 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     networks:
       - atlas-network
 
@@ -69,6 +73,9 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
     networks:
       - atlas-network
 
@@ -87,6 +94,8 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     networks:
       - atlas-network
 
@@ -415,3 +424,8 @@ networks:
 volumes:
   atlas_postgres_data:
   mongo_data:
+  redis_data:
+  rabbitmq_data:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
