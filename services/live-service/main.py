@@ -342,6 +342,21 @@ def validate_internal_jwt(auth_header: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid internal authentication")
 
 
+# ── FastAPI App ─────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(rabbitmq_consumer())
+    asyncio.create_task(notifications_consumer())
+    asyncio.create_task(manager._eviction_loop())
+    yield
+
+app = FastAPI(title="Atlas Live Service", description="Real-time SSE + WebSocket engine for 25 live channels", version="1.0.0", lifespan=lifespan)
+
+configure_logging("live-service", level=logging.INFO)
+logger = get_logger("live-service")
+
+
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
     if request.url.path in ("/health", "/metrics"):
@@ -362,21 +377,6 @@ async def internal_auth_middleware(request: Request, call_next):
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
-
-
-# ── FastAPI App ─────────────────────────────────────────────────────────────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    asyncio.create_task(rabbitmq_consumer())
-    asyncio.create_task(notifications_consumer())
-    asyncio.create_task(manager._eviction_loop())
-    yield
-
-app = FastAPI(title="Atlas Live Service", description="Real-time SSE + WebSocket engine for 25 live channels", version="1.0.0", lifespan=lifespan)
-
-configure_logging("live-service", level=logging.INFO)
-logger = get_logger("live-service")
 
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS.split(",") if CORS_ORIGINS != "*" else ["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
