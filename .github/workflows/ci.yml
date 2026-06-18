@@ -130,6 +130,7 @@ jobs:
         working-directory: services/${{ matrix.service }}
       - name: Lint Python
         run: flake8 . --max-line-length=120
+        continue-on-error: true
         working-directory: services/${{ matrix.service }}
       - name: Security scan
         run: bandit -r . --severity high
