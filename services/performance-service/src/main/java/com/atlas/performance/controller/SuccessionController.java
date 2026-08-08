@@ -3,6 +3,7 @@ package com.atlas.performance.controller;
 import com.atlas.performance.model.SuccessionCandidate;
 import com.atlas.performance.model.SuccessionPlan;
 import com.atlas.common.security.RequiresRole;
+import com.atlas.common.security.TenantId;
 import com.atlas.performance.service.PerformanceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -24,7 +25,7 @@ public class SuccessionController {
     @RequiresRole({"admin", "hr", "manager"})
     @GetMapping("/plans")
     public ResponseEntity<List<SuccessionPlan>> listPlans(
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId,
+            @TenantId String tenantId,
             @RequestParam(required = false) String department,
             @RequestParam(required = false) String status) {
         return ResponseEntity.ok(service.getSuccessionPlans(tenantId, department, status));
@@ -34,7 +35,7 @@ public class SuccessionController {
     @PostMapping("/plans")
     public ResponseEntity<?> createPlan(
             @RequestBody SuccessionPlan plan,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.createSuccessionPlan(tenantId, plan));
         } catch (IllegalArgumentException e) {
@@ -46,7 +47,7 @@ public class SuccessionController {
     @GetMapping("/plans/{id}")
     public ResponseEntity<?> getPlan(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.getSuccessionPlanWithCandidates(tenantId, id));
         } catch (IllegalArgumentException e) {
@@ -59,7 +60,7 @@ public class SuccessionController {
     public ResponseEntity<?> updatePlan(
             @PathVariable String id,
             @RequestBody SuccessionPlan plan,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.updateSuccessionPlan(tenantId, id, plan));
         } catch (IllegalArgumentException e) {
@@ -71,7 +72,7 @@ public class SuccessionController {
     @DeleteMapping("/plans/{id}")
     public ResponseEntity<?> deletePlan(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             service.deleteSuccessionPlan(tenantId, id);
             return ResponseEntity.ok(Map.of("message", "Succession plan deleted successfully"));
@@ -84,7 +85,7 @@ public class SuccessionController {
     @PostMapping("/candidates")
     public ResponseEntity<?> addCandidate(
             @RequestBody SuccessionCandidate candidate,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.addCandidate(tenantId, candidate));
         } catch (IllegalArgumentException e) {
@@ -97,7 +98,7 @@ public class SuccessionController {
     public ResponseEntity<?> updateCandidate(
             @PathVariable String id,
             @RequestBody SuccessionCandidate candidate,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.updateCandidate(tenantId, id, candidate));
         } catch (IllegalArgumentException e) {
@@ -109,7 +110,7 @@ public class SuccessionController {
     @DeleteMapping("/candidates/{id}")
     public ResponseEntity<?> removeCandidate(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             service.removeCandidate(tenantId, id);
             return ResponseEntity.ok(Map.of("message", "Candidate removed successfully"));
@@ -122,7 +123,7 @@ public class SuccessionController {
     @GetMapping("/readiness/{employeeId}")
     public ResponseEntity<List<SuccessionCandidate>> getEmployeeReadiness(
             @PathVariable String employeeId,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         return ResponseEntity.ok(service.getEmployeeReadiness(tenantId, employeeId));
     }
 }

@@ -2,6 +2,7 @@ package com.atlas.performance.controller;
 
 import com.atlas.performance.model.PerformanceReview;
 import com.atlas.common.security.RequiresRole;
+import com.atlas.common.security.TenantId;
 import com.atlas.performance.service.PerformanceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -23,7 +24,7 @@ public class PerformanceReviewController {
     @RequiresRole({"admin", "hr", "manager", "employee"})
     @GetMapping
     public ResponseEntity<List<PerformanceReview>> listReviews(
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId,
+            @TenantId String tenantId,
             @RequestParam(required = false) String employeeId,
             @RequestParam(required = false) String reviewerId,
             @RequestParam(required = false) String status,
@@ -35,7 +36,7 @@ public class PerformanceReviewController {
     @PostMapping
     public ResponseEntity<?> createReview(
             @RequestBody PerformanceReview review,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.createReview(tenantId, review));
         } catch (IllegalArgumentException e) {
@@ -47,7 +48,7 @@ public class PerformanceReviewController {
     @GetMapping("/{id}")
     public ResponseEntity<?> getReview(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.getReview(tenantId, id));
         } catch (IllegalArgumentException e) {
@@ -60,7 +61,7 @@ public class PerformanceReviewController {
     public ResponseEntity<?> updateReview(
             @PathVariable String id,
             @RequestBody PerformanceReview review,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.updateReview(tenantId, id, review));
         } catch (IllegalArgumentException e) {
@@ -72,7 +73,7 @@ public class PerformanceReviewController {
     @PutMapping("/{id}/submit")
     public ResponseEntity<?> submitReview(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.submitReview(tenantId, id));
         } catch (IllegalArgumentException e) {
@@ -84,7 +85,7 @@ public class PerformanceReviewController {
     @PutMapping("/{id}/acknowledge")
     public ResponseEntity<?> acknowledgeReview(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.acknowledgeReview(tenantId, id));
         } catch (IllegalArgumentException e) {
@@ -96,7 +97,7 @@ public class PerformanceReviewController {
     @GetMapping("/cycle/{cycle}")
     public ResponseEntity<List<PerformanceReview>> getReviewsByCycle(
             @PathVariable String cycle,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         return ResponseEntity.ok(service.getReviewsByCycle(tenantId, cycle));
     }
 
@@ -104,7 +105,7 @@ public class PerformanceReviewController {
     @GetMapping("/employee/{employeeId}")
     public ResponseEntity<List<PerformanceReview>> getReviewHistory(
             @PathVariable String employeeId,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         return ResponseEntity.ok(service.getReviewHistory(tenantId, employeeId));
     }
 }
