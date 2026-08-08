@@ -245,6 +245,11 @@ services:
       - "8003:8003"
     environment:
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
+      - POSTGRES_USER=${POSTGRES_USER:-atlas_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-atlas_password}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=${RABBITMQ_USER:-atlas_rabbit}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASS:-changeme_rabbit_pass}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
       - atlas-network
