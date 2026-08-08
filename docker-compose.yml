@@ -127,6 +127,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
       - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
       - atlas-network

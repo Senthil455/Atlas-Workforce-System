@@ -65,8 +65,12 @@ from schemas import (
 
 load_dotenv()
 
+configure_logging("integration-service", level=logging.INFO)
+logger = get_logger("integration-service")
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://atlas_user:atlas_password@postgres:5432/atlas_db")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "svc-integration-key-change-in-production")
+INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000")
 MAX_PAGE_SIZE = 100
 
@@ -159,7 +163,8 @@ async def internal_auth_middleware(request: Request, call_next):
         claims = verify_internal_auth(request, INTERNAL_JWT_SECRET)
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
-    except Exception:
+    except Exception as e:
+        logger.exception("Internal auth middleware failure (non-auth exception): %s", e)
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
