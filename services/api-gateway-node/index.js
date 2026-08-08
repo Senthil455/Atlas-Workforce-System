@@ -126,6 +126,11 @@ if (!JWT_SECRET) {
   process.exit(1);
 }
 
+if (NODE_ENV !== 'development' && (INTERNAL_JWT_SECRET === 'atlas-internal-jwt-secret-change-me' || JWT_SECRET === 'change-me-to-a-long-random-string')) {
+  console.error('FATAL: refusing to start outside development with known default secrets (INTERNAL_JWT_SECRET / JWT_SECRET); set strong values via .env');
+  process.exit(1);
+}
+
 const jwtSecret = JWT_SECRET;
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')

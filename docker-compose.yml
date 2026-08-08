@@ -146,6 +146,7 @@ services:
       - "8080:8080"
     environment:
       - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
+      - NODE_ENV=${NODE_ENV:-development}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
       - AUTH_SERVICE_URL=http://auth-service:8010
       - EMPLOYEE_SERVICE_URL=http://employee-service:8001
