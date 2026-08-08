@@ -132,10 +132,22 @@ def health_check():
     return {"status": "Analytics Service is running"}
 
 
+RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "")
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
 RABBITMQ_PORT = int(os.environ.get("RABBITMQ_PORT", "5672"))
-RABBITMQ_USER = os.environ["RABBITMQ_USER"]
-RABBITMQ_PASSWORD = os.environ["RABBITMQ_PASSWORD"]
+RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "guest")
+RABBITMQ_PASSWORD = os.environ.get("RABBITMQ_PASSWORD", "guest")
+
+
+def _rabbitmq_params():
+    if RABBITMQ_URL:
+        return pika.URLParameters(RABBITMQ_URL)
+    return pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD),
+    )
+
 
 EMPLOYEE_SERVICE_URL = os.environ.get("EMPLOYEE_SERVICE_URL", "http://employee-service:8001")
 
@@ -785,12 +797,7 @@ def payroll_processed_consumer():
 
     while True:
         try:
-            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
-            params = pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                port=RABBITMQ_PORT,
-                credentials=credentials,
-            )
+            params = _rabbitmq_params()
             connection = pika.BlockingConnection(params)
             channel = connection.channel()
             channel.exchange_declare(exchange="live_exchange", exchange_type="topic", durable=True)
@@ -823,12 +830,7 @@ def employee_deletion_consumer():
 
     while True:
         try:
-            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
-            params = pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                port=RABBITMQ_PORT,
-                credentials=credentials,
-            )
+            params = _rabbitmq_params()
             connection = pika.BlockingConnection(params)
             channel = connection.channel()
             channel.exchange_declare(exchange="notifications_exchange", exchange_type="fanout", durable=True)

@@ -64,10 +64,11 @@ DB_NAME = "atlas_db"
 
 INTERNAL_KEY = os.environ.get("INTERNAL_KEY", "")
 
+RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "")
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
 RABBITMQ_PORT = int(os.environ.get("RABBITMQ_PORT", "5672"))
 RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "guest")
-RABBITMQ_PASSWORD = os.environ["RABBITMQ_PASSWORD"]
+RABBITMQ_PASSWORD = os.environ.get("RABBITMQ_PASSWORD", "guest")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -151,12 +152,15 @@ async def publish_delete_event(email: str, tenant_id: str):
 
 def _publish_delete_event_sync(email: str, tenant_id: str):
     try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
-        params = pika.ConnectionParameters(
-            host=RABBITMQ_HOST,
-            port=RABBITMQ_PORT,
-            credentials=credentials,
-        )
+        if RABBITMQ_URL:
+            params = pika.URLParameters(RABBITMQ_URL)
+        else:
+            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
+            params = pika.ConnectionParameters(
+                host=RABBITMQ_HOST,
+                port=RABBITMQ_PORT,
+                credentials=credentials,
+            )
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
         channel.exchange_declare(exchange="notifications_exchange", exchange_type="fanout", durable=True)
