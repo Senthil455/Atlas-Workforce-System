@@ -2,6 +2,7 @@ package com.atlas.performance.controller;
 
 import com.atlas.performance.model.Feedback360;
 import com.atlas.common.security.RequiresRole;
+import com.atlas.common.security.TenantId;
 import com.atlas.performance.service.PerformanceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -23,7 +24,7 @@ public class FeedbackController {
     @RequiresRole({"admin", "hr", "manager"})
     @GetMapping
     public ResponseEntity<List<Feedback360>> listFeedback(
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId,
+            @TenantId String tenantId,
             @RequestParam(required = false) String employeeId,
             @RequestParam(required = false) String reviewerId) {
         return ResponseEntity.ok(service.getFeedbackList(tenantId, employeeId, reviewerId));
@@ -33,7 +34,7 @@ public class FeedbackController {
     @PostMapping
     public ResponseEntity<?> submitFeedback(
             @RequestBody Feedback360 feedback,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.submitFeedback(tenantId, feedback));
         } catch (IllegalArgumentException e) {
@@ -45,7 +46,7 @@ public class FeedbackController {
     @GetMapping("/{id}")
     public ResponseEntity<?> getFeedback(
             @PathVariable String id,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             return ResponseEntity.ok(service.getFeedback(tenantId, id));
         } catch (IllegalArgumentException e) {
@@ -57,7 +58,7 @@ public class FeedbackController {
     @GetMapping("/employee/{employeeId}/summary")
     public ResponseEntity<Map<String, Object>> getFeedbackSummary(
             @PathVariable String employeeId,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         return ResponseEntity.ok(service.getFeedbackSummary(tenantId, employeeId));
     }
 }

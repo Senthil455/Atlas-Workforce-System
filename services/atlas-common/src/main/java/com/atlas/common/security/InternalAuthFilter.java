@@ -81,7 +81,14 @@ public class InternalAuthFilter implements Filter {
 				return;
 			}
 
-			request.setAttribute("x-tenant-id", claims.getOrDefault("tenant_id", "default"));
+			String tenantId = String.valueOf(claims.getOrDefault("tenant_id", "default"));
+			String headerTenantId = request.getHeader("X-Tenant-Id");
+			if (headerTenantId != null && !headerTenantId.isEmpty() && !tenantId.equals(headerTenantId)) {
+				sendError(response, 403, "Tenant mismatch: X-Tenant-Id does not match verified token claims");
+				return;
+			}
+
+			request.setAttribute("x-tenant-id", tenantId);
 			request.setAttribute("x-user-role", claims.getOrDefault("user_role", "employee"));
 			request.setAttribute("x-user-id", claims.getOrDefault("user_id", ""));
 

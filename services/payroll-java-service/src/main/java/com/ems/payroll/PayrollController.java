@@ -1,6 +1,7 @@
 package com.ems.payroll;
 
 import com.atlas.common.security.RequiresRole;
+import com.atlas.common.security.TenantId;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
@@ -22,14 +23,14 @@ public class PayrollController {
 
     @RequiresRole({"admin", "hr", "manager", "employee"})
     @GetMapping
-    public ResponseEntity<List<PayrollRecord>> getAllPayrolls(@RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+    public ResponseEntity<List<PayrollRecord>> getAllPayrolls(@TenantId String tenantId) {
         return ResponseEntity.ok(service.getAllPayrolls(tenantId));
     }
 
     @RequiresRole({"admin", "hr", "manager", "employee"})
     @GetMapping("/employee/{employeeId}")
     public ResponseEntity<List<PayrollRecord>> getPayrollsByEmployee(
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId,
+            @TenantId String tenantId,
             @PathVariable String employeeId) {
         return ResponseEntity.ok(service.getPayrollsByEmployeeId(tenantId, employeeId));
     }
@@ -38,7 +39,7 @@ public class PayrollController {
     @PostMapping("/run")
     public ResponseEntity<?> runPayroll(
             @RequestBody Map<String, Object> request,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
 
         try {
             String employeeId = (String) request.get("employeeId");
