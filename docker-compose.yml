@@ -125,7 +125,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
@@ -211,7 +211,7 @@ services:
       - "8001:8001"
     environment:
       - MONGO_URL=mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-changeme_mongo_pass}@mongodb:27017/${MONGO_DB:-atlas_db}?authSource=admin
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
     networks:
       - atlas-network
     depends_on:
@@ -229,6 +229,8 @@ services:
       - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:-atlas_password}
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=${RABBITMQ_USER:-atlas_rabbit}
+      - SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASS:-changeme_rabbit_pass}
     networks:
       - atlas-network
     depends_on:
@@ -244,6 +246,7 @@ services:
       - "8003:8003"
     environment:
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
       - atlas-network
@@ -257,7 +260,7 @@ services:
     ports:
       - "8004:8004"
     environment:
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
     networks:
       - atlas-network
