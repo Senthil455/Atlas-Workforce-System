@@ -3,6 +3,7 @@ name: Enterprise Polyglot CI
 permissions:
   contents: read
   packages: write
+  security-events: write
 
 on:
   push:
@@ -39,7 +40,6 @@ jobs:
         run: npm test
       - name: Security audit
         run: npm audit --audit-level=high
-        continue-on-error: true
       - name: Build
         run: npm run build
         env:
@@ -64,7 +64,6 @@ jobs:
         working-directory: services/${{ matrix.service }}
       - name: Security audit
         run: npm audit --audit-level=high
-        continue-on-error: true
         working-directory: services/${{ matrix.service }}
       - name: Syntax check
         run: node -c index.js
@@ -100,8 +99,13 @@ jobs:
       - name: Security scan
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -no-fail -fmt sarif -out gosec-results.sarif ./...
+          gosec -fmt sarif -out gosec-results.sarif ./...
         working-directory: services/${{ matrix.service }}
+      - name: Upload gosec results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: services/${{ matrix.service }}/gosec-results.sarif
+        if: always() && hashFiles('services/**/gosec-results.sarif') != ''
 
   python-services-check:
     name: Python Services CI
@@ -123,19 +127,22 @@ jobs:
           pip install -r requirements.txt
         working-directory: services/${{ matrix.service }}
       - name: Install linting tools
-        run: pip install flake8 pytest pytest-asyncio httpx bandit
+        run: pip install flake8 pytest pytest-asyncio httpx bandit sarif-om jschema-to-python
         working-directory: services/${{ matrix.service }}
       - name: Syntax check
         run: python -m py_compile main.py
         working-directory: services/${{ matrix.service }}
       - name: Lint Python
-        run: flake8 . --max-line-length=120
-        continue-on-error: true
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --max-line-length=120
         working-directory: services/${{ matrix.service }}
       - name: Security scan
-        run: bandit -r . --severity high
+        run: bandit -r . -f sarif -o bandit-results.sarif --severity-level high
         working-directory: services/${{ matrix.service }}
-        continue-on-error: true
+      - name: Upload bandit results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: services/${{ matrix.service }}/bandit-results.sarif
+        if: always() && hashFiles('services/**/bandit-results.sarif') != ''
       - name: Set test environment variables
         run: |
           echo "RABBITMQ_USER=guest" >> $GITHUB_ENV
@@ -263,7 +270,6 @@ jobs:
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
           exit-code: 1
-        continue-on-error: true
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
