@@ -185,18 +185,45 @@ public class PayrollEnterpriseService {
         if (brackets.isEmpty()) {
             return calculateSimpleTax(grossSalary);
         }
+        // Ensure brackets are processed in order
+        brackets.sort(Comparator.comparingInt(b -> b.getBracketOrder() != null ? b.getBracketOrder() : 0));
+
         double tax = 0;
-        double remaining = grossSalary;
         for (TaxBracket bracket : brackets) {
-            if (remaining <= 0) break;
-            double bracketAmount = Math.min(remaining, bracket.getMaxIncome() != null && bracket.getMaxIncome() > 0
-                    ? bracket.getMaxIncome() - bracket.getMinIncome() : Double.MAX_VALUE);
-            if (bracket.getFlatAmount() != null && bracket.getFlatAmount() > 0) {
-                tax += bracket.getFlatAmount();
-            } else {
-                tax += bracketAmount * bracket.getRate();
+            double minIncome = bracket.getMinIncome() != null ? bracket.getMinIncome() : 0;
+            Double maxIncomeObj = bracket.getMaxIncome();
+            double maxIncome = (maxIncomeObj != null && maxIncomeObj > 0) ? maxIncomeObj : Double.MAX_VALUE;
+            double rate = bracket.getRate() != null ? bracket.getRate() : 0;
+            Double flatAmount = bracket.getFlatAmount();
+
+            if (grossSalary <= minIncome) {
+                break;
             }
-            remaining -= bracketAmount;
+
+            double upper = Math.min(grossSalary, maxIncome);
+            double taxableInBracket = upper - minIncome;
+            if (taxableInBracket <= 0) {
+                continue;
+            }
+
+            // Flat amount handling: a flatAmount is the tax for income up to
+            // minIncome (base tax). The old loop always did `tax += flatAmount`
+            // which double counts and makes 10100 and 19900 pay the same flat
+            // regardless of marginal amount. Correct progressive tax is the sum
+            // of `taxableInBracket * rate` across brackets. When a bracket has
+            // a non-zero rate we ignore flatAmount and use the marginal rate
+            // (the base is already covered by the sum of lower brackets). Only
+            // for flat-only brackets (fixed fee with no rate) do we apply the
+            // flat amount.
+            if (flatAmount != null && flatAmount > 0 && rate == 0) {
+                tax += flatAmount;
+            } else {
+                tax += taxableInBracket * rate;
+            }
+
+            if (grossSalary <= maxIncome) {
+                break;
+            }
         }
         return tax;
     }
