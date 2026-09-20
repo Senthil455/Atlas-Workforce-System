@@ -39,12 +39,12 @@ clean:
 test:
 	@echo "Running all backend tests..."
 	@failed=0; \
-	cd services/api-gateway-node && npm test || failed=1; \
-	cd services/auth-service && npm test || failed=1; \
-	cd services/employee-python-service && python -m pytest -v || failed=1; \
-	cd services/analytics-python-service && python -m pytest -v || failed=1; \
-	cd services/payroll-java-service && mvn test || failed=1; \
-	cd services/leave-service && mvn test || failed=1; \
+	(cd services/api-gateway-node && npm test) || failed=1; \
+	(cd services/auth-service && npm test) || failed=1; \
+	(cd services/employee-python-service && python -m pytest -v) || failed=1; \
+	(cd services/analytics-python-service && python -m pytest -v) || failed=1; \
+	(cd services/payroll-java-service && mvn test) || failed=1; \
+	(cd services/leave-service && mvn test) || failed=1; \
 	if [ $$failed -ne 0 ]; then \
 		echo ""; \
 		echo "FAILURE: Some backend tests failed."; \
