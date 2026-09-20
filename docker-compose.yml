@@ -2,7 +2,8 @@
 # Before deploying to production, set ALL of the following environment variables:
 #   JWT_SECRET, INTERNAL_JWT_SECRET, POSTGRES_PASSWORD, MONGO_PASSWORD,
 #   MONGO_USER, REDIS_PASSWORD, RABBITMQ_USER, RABBITMQ_PASS,
-#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY.
+#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY,
+#   OAUTH_ENCRYPTION_KEY.
 # Generate strong secrets: openssl rand -base64 64
 services:
   postgres:
@@ -167,6 +168,8 @@ services:
       - SECURITY_SERVICE_URL=http://security-service:8050
       - AI_SERVICE_URL=http://ai-service:8065
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      - SLACK_WEBHOOK_SECRET=${SLACK_WEBHOOK_SECRET:-}
     networks:
       - atlas-network
     depends_on:
@@ -201,6 +204,7 @@ services:
       - SAML_IDP_SSO_URL=${SAML_IDP_SSO_URL:-https://idp.example.com/sso}
       - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID:-https://idp.example.com/metadata}
       - SAML_IDP_CERT=${SAML_IDP_CERT:-}
+      - OAUTH_ENCRYPTION_KEY=${OAUTH_ENCRYPTION_KEY:-}
     networks:
       - atlas-network
     depends_on:

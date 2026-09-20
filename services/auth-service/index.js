@@ -126,6 +126,100 @@ if (NODE_ENV !== 'development' && (JWT_SECRET === 'change-me-to-a-long-random-st
 
 const jwtSecret = JWT_SECRET;
 
+// OAuth at-rest encryption for sensitive provider secrets and tokens.
+// Uses OAUTH_ENCRYPTION_KEY when set, otherwise derives a 32-byte key
+// from JWT_SECRET so existing deployments still get encryption at rest
+// without leaving plaintext in the DB.
+const OAUTH_ENCRYPTION_KEY_RAW = process.env.OAUTH_ENCRYPTION_KEY || JWT_SECRET;
+
+function getOAuthEncryptionKey() {
+  return crypto.createHash('sha256').update(OAUTH_ENCRYPTION_KEY_RAW).digest();
+}
+
+function encryptOAuthSecret(plaintext) {
+  if (!plaintext) return plaintext;
+  const key = getOAuthEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, encrypted]).toString('base64');
+}
+
+function decryptOAuthSecret(ciphertextB64) {
+  if (!ciphertextB64) return ciphertextB64;
+  try {
+    const key = getOAuthEncryptionKey();
+    const data = Buffer.from(ciphertextB64, 'base64');
+    if (data.length < 28) return ciphertextB64;
+    const iv = data.subarray(0, 12);
+    const tag = data.subarray(12, 28);
+    const encrypted = data.subarray(28);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    return ciphertextB64;
+  }
+}
+
+function isEncryptedOAuthSecret(value) {
+  if (!value || typeof value !== 'string') return false;
+  if (value.length < 40) return false;
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(value)) return false;
+  try {
+    const data = Buffer.from(value, 'base64');
+    return data.length >= 28;
+  } catch {
+    return false;
+  }
+}
+
+function validateOAuthIdToken(idToken, provider, expectedClientId, expectedEmail) {
+  if (!idToken) return { valid: true, skipped: true };
+  let payload;
+  try {
+    payload = jwt.decode(idToken);
+    if (!payload || typeof payload !== 'object') {
+      return { valid: false, reason: 'invalid id_token structure' };
+    }
+  } catch {
+    return { valid: false, reason: 'id_token decode failed' };
+  }
+  if (payload.exp && Date.now() >= payload.exp * 1000) {
+    return { valid: false, reason: 'id_token expired' };
+  }
+  if (payload.nbf && Date.now() < payload.nbf * 1000) {
+    return { valid: false, reason: 'id_token not yet valid' };
+  }
+  const iss = payload.iss || '';
+  const expectedIssPrefixes = {
+    google: ['https://accounts.google.com', 'https://oauth2.googleapis.com'],
+    microsoft: ['https://login.microsoftonline.com'],
+    okta: ['.okta.com'],
+    github: [],
+  };
+  const prefixes = expectedIssPrefixes[provider] || [];
+  if (prefixes.length > 0) {
+    const matched = prefixes.some(function (p) { return iss.indexOf(p) !== -1; });
+    if (!matched) return { valid: false, reason: 'issuer mismatch: ' + iss };
+  }
+  if (payload.aud && payload.aud !== expectedClientId) {
+    return { valid: false, reason: 'audience mismatch' };
+  }
+  if (payload.email && expectedEmail && payload.email.toLowerCase() !== expectedEmail.toLowerCase()) {
+    return { valid: false, reason: 'email mismatch between id_token and userinfo' };
+  }
+  if (payload.email_verified !== undefined) {
+    const ev = payload.email_verified;
+    if (ev !== true && ev !== 'true') {
+      return { valid: false, reason: 'email_verified false in id_token' };
+    }
+  }
+  return { valid: true };
+}
+
 if (!process.env.POSTGRES_URL) {
   console.error('FATAL: POSTGRES_URL environment variable is required');
   process.exit(1);
@@ -602,6 +696,22 @@ async function initDB() {
       UNIQUE(provider, provider_user_id)
     );
   `);
+
+  // Harden oauth_providers client_secret column to TEXT and migrate plaintext secrets to encrypted at-rest values
+  try {
+    await pool.query("ALTER TABLE oauth_providers ALTER COLUMN client_secret TYPE TEXT USING client_secret::text");
+  } catch (e) { /* column already TEXT or migration not needed */ }
+  try {
+    const existing = await pool.query('SELECT id, client_secret FROM oauth_providers');
+    for (const row of existing.rows) {
+      if (row.client_secret && !isEncryptedOAuthSecret(row.client_secret)) {
+        const enc = encryptOAuthSecret(row.client_secret);
+        await pool.query('UPDATE oauth_providers SET client_secret = $1 WHERE id = $2', [enc, row.id]);
+      }
+    }
+  } catch (e) {
+    console.error('OAuth provider secret migration failed:', e.message);
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS rotated_tokens (
@@ -2128,11 +2238,11 @@ app.delete('/webauthn/credentials/:id', requireRole(), async (req, res) => {
 
 // ── OAuth Enterprise Login ─────────────────────────────────────────────────
 
-app.get('/oauth/providers', async (req, res) => {
+app.get('/oauth/providers', requireRole('admin'), async (req, res) => {
   try {
-    const tenantId = req.query.tenant_id || 'default';
+    const tenantId = req.user.tenant_id || 'default';
     const result = await pool.query(
-      'SELECT id, provider, client_id, redirect_uri, scopes, enabled FROM oauth_providers WHERE tenant_id = $1 ORDER BY provider',
+      'SELECT id, provider, client_id, redirect_uri, scopes, enabled, tenant_id FROM oauth_providers WHERE tenant_id = $1 ORDER BY provider',
       [tenantId]
     );
     res.json(result.rows);
@@ -2142,17 +2252,20 @@ app.get('/oauth/providers', async (req, res) => {
   }
 });
 
-app.post('/oauth/providers', async (req, res) => {
+app.post('/oauth/providers', requireRole('admin'), async (req, res) => {
   try {
-    const { provider, client_id, client_secret, redirect_uri, scopes, tenant_id } = req.body;
+    const { provider, client_id, client_secret, redirect_uri, scopes } = req.body;
+    const tenantId = req.user.tenant_id || 'default';
     if (!provider || !client_id || !client_secret) {
       return res.status(400).json({ message: 'provider, client_id, client_secret are required' });
     }
+    const encryptedSecret = encryptOAuthSecret(client_secret);
     const result = await pool.query(
       `INSERT INTO oauth_providers (provider, client_id, client_secret, redirect_uri, scopes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, provider, client_id, redirect_uri, scopes, enabled`,
-      [provider, client_id, client_secret, redirect_uri || '', scopes || 'openid email profile', tenant_id || 'default']
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, provider, client_id, redirect_uri, scopes, enabled, tenant_id`,
+      [provider, client_id, encryptedSecret, redirect_uri || '', scopes || 'openid email profile', tenantId]
     );
+    await sendAuditEvent('auth.oauth_provider_created', req.user.id, req.user.email, { provider, tenant_id: tenantId });
     res.status(201).json(result.rows[0]);
   } catch (err) {
     if (err.code === '23505') {
@@ -2300,12 +2413,13 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
     const tokenConfig = tokenConfigs[provider] || tokenConfigs.google;
 
     try {
+      const clientSecret = isEncryptedOAuthSecret(prov.client_secret) ? decryptOAuthSecret(prov.client_secret) : prov.client_secret;
       const tokenResponse = await axios.post(
         tokenConfig.tokenUrl,
         new URLSearchParams({
           code,
           client_id: prov.client_id,
-          client_secret: prov.client_secret,
+          client_secret: clientSecret,
           redirect_uri: prov.redirect_uri || `${req.protocol}://${req.get('host')}/oauth/callback/${provider}`,
           grant_type: 'authorization_code',
         }).toString(),
@@ -2328,6 +2442,54 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
       const name = userInfo.name || userInfo.displayName || userInfo.login || email;
       const providerUserId = String(userInfo.id || userInfo.sub || userInfo.login || email);
 
+      const idTokenValidation = validateOAuthIdToken(idToken, provider, prov.client_id, email);
+      if (!idTokenValidation.valid) {
+        return res.status(401).json({ message: 'OAuth id_token validation failed: ' + idTokenValidation.reason });
+      }
+
+      let emailVerifiedRaw = userInfo.email_verified;
+      if (emailVerifiedRaw === undefined) emailVerifiedRaw = userInfo.verified;
+      if (emailVerifiedRaw === undefined) emailVerifiedRaw = userInfo.verified_email;
+      let emailVerified = emailVerifiedRaw;
+      if (typeof emailVerified === 'string') emailVerified = emailVerified.toLowerCase() === 'true';
+
+      if (provider === 'github' && (emailVerified === null || emailVerified === undefined)) {
+        try {
+          const emailsRes = await axios.get('https://api.github.com/user/emails', {
+            headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+            timeout: 5000,
+          });
+          if (Array.isArray(emailsRes.data)) {
+            const match = emailsRes.data.find(function (e) { return e.email && e.email.toLowerCase() === String(email).toLowerCase(); });
+            if (match) {
+              emailVerified = match.verified === true;
+            } else if (email && String(email).indexOf('@') !== -1 && !String(email).endsWith('.oauth')) {
+              emailVerified = false;
+            }
+          }
+        } catch (e) {
+          if (String(email).endsWith('.oauth')) {
+            return res.status(403).json({ message: 'GitHub email not verified' });
+          }
+        }
+      }
+
+      if (['google', 'microsoft', 'okta'].includes(provider)) {
+        const decoded = idToken ? jwt.decode(idToken) : null;
+        const idTokenEmailVerified = decoded && (decoded.email_verified === true || decoded.email_verified === 'true');
+        const verified = emailVerified === true || idTokenEmailVerified === true;
+        if (!verified) {
+          return res.status(403).json({ message: 'Email not verified by provider' });
+        }
+        if (!email || String(email).indexOf('@') === -1 || String(email).endsWith('.oauth')) {
+          return res.status(403).json({ message: 'Verified email required for provisioning' });
+        }
+      }
+
+      if (String(email).endsWith('.oauth') && ['google', 'microsoft', 'okta'].includes(provider)) {
+        return res.status(403).json({ message: 'Verified email required' });
+      }
+
       let userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
       let userData;
 
@@ -2341,17 +2503,22 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
         userData = userResult.rows[0];
       } else {
         userData = userResult.rows[0];
+        if (userData.tenant_id && userData.tenant_id !== oauthState.tenant_id) {
+          return res.status(403).json({ message: 'Email already registered in another tenant' });
+        }
       }
 
       if (!userData.active) {
         return res.status(403).json({ message: 'Account is deactivated' });
       }
 
+      const encryptedAccessToken = accessToken ? encryptOAuthSecret(accessToken) : null;
+      const encryptedRefreshToken = tokenResponse.data.refresh_token ? encryptOAuthSecret(tokenResponse.data.refresh_token) : null;
       await pool.query(
         `INSERT INTO oauth_links (user_id, provider, provider_user_id, access_token, refresh_token, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (provider, provider_user_id) DO UPDATE SET access_token = $4, refresh_token = COALESCE($5, oauth_links.refresh_token), expires_at = $6`,
-        [userData.id, provider, providerUserId, accessToken, tokenResponse.data.refresh_token || null,
+        [userData.id, provider, providerUserId, encryptedAccessToken, encryptedRefreshToken,
          tokenResponse.data.expires_in ? new Date(Date.now() + tokenResponse.data.expires_in * 1000) : null]
       );
 
@@ -2367,10 +2534,12 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
         provider,
       });
     } catch (oauthErr) {
+      if (res.headersSent) return;
       console.error('OAuth token exchange error:', oauthErr.response?.data || oauthErr.message);
       res.status(502).json({ message: `OAuth ${provider} authentication failed` });
     }
   } catch (err) {
+    if (res.headersSent) return;
     console.error(err);
     res.status(500).json({ message: 'OAuth callback processing failed' });
   }
