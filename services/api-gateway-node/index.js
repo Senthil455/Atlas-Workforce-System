@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const redis = require('redis');
 const axios = require('axios');
@@ -124,6 +125,10 @@ async function checkCache(req, res, next) {
 }
 
 const app = express();
+// Trust proxy is required so express-rate-limit sees the real client IP behind k8s ingress / docker proxy.
+// Number of trusted hops is configurable via TRUST_PROXY_HOPS (defaults to 1 for single ingress).
+const TRUST_PROXY_HOPS = parseInt(process.env.TRUST_PROXY_HOPS || '1', 10);
+app.set('trust proxy', TRUST_PROXY_HOPS);
 const PORT = process.env.PORT || 8080;
 const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -189,10 +194,14 @@ app.use(morgan('dev'));
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many requests, please try again later' }
+  message: { message: 'Too many requests, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:global:',
+  }),
 });
 app.use(globalLimiter);
 
@@ -218,7 +227,11 @@ const authLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many auth requests, please try again later' }
+  message: { message: 'Too many auth requests, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:auth:',
+  }),
 });
 
 const loginLimiter = rateLimit({
@@ -226,7 +239,11 @@ const loginLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many login attempts, please try again later' }
+  message: { message: 'Too many login attempts, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:login:',
+  }),
 });
 
 const apiLimiter = rateLimit({
@@ -234,7 +251,11 @@ const apiLimiter = rateLimit({
   max: 500,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many API requests, please try again later' }
+  message: { message: 'Too many API requests, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:api:',
+  }),
 });
 
 const sensitiveLimiter = rateLimit({
@@ -242,7 +263,11 @@ const sensitiveLimiter = rateLimit({
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many requests to sensitive endpoints, please try again later' }
+  message: { message: 'Too many requests to sensitive endpoints, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:sensitive:',
+  }),
 });
 
 app.use('/api/auth', authLimiter);
