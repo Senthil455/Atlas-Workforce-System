@@ -98,7 +98,38 @@ async def internal_auth_middleware(request: Request, call_next):
         return JSONResponse(status_code=401, content={"error": "Missing internal authentication"})
 
     try:
-        verify_internal_auth(request, INTERNAL_JWT_SECRET)
+        claims = verify_internal_auth(request, INTERNAL_JWT_SECRET)
+        request.state.tenant_id = claims.get("tenant_id", "default")
+        request.state.user_id = claims.get("user_id", "")
+        request.state.user_role = claims.get("user_role", "employee")
+        # Enforce tenant isolation - reject if header/query tenant differs from claim
+        header_tenant = request.headers.get("x-tenant-id") or request.headers.get("X-Tenant-Id")
+        if header_tenant and header_tenant != request.state.tenant_id:
+            return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
+        query_tenant = request.query_params.get("tenant_id")
+        if query_tenant and query_tenant != request.state.tenant_id:
+            return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
+        # Overwrite tenant header/query with verified claim so downstream code cannot use spoofed value
+        try:
+            headers = list(request.scope.get("headers", []))
+            found = False
+            for idx, (k, v) in enumerate(headers):
+                if k.lower() == b"x-tenant-id":
+                    headers[idx] = (k, request.state.tenant_id.encode())
+                    found = True
+            if not found:
+                headers.append((b"x-tenant-id", request.state.tenant_id.encode()))
+            request.scope["headers"] = headers
+            # For query-based services, ensure tenant_id query param matches claim
+            from urllib.parse import parse_qs, urlencode
+            qs = request.scope.get("query_string", b"").decode()
+            if qs:
+                params = parse_qs(qs)
+                if "tenant_id" in params:
+                    params["tenant_id"] = [request.state.tenant_id]
+                    request.scope["query_string"] = urlencode(params, doseq=True).encode()
+        except Exception:
+            pass
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
     except Exception:

@@ -13,12 +13,12 @@ from main import app
 INTERNAL_JWT_SECRET = "test-secret"
 
 
-def _make_internal_token(secret: str) -> str:
+def _make_internal_token(secret: str, tenant_id: str = "test-tenant") -> str:
     hdr = base64.urlsafe_b64encode(
         json.dumps({"alg": "HS256", "typ": "JWT"}).encode()
     ).rstrip(b"=").decode()
     payload = base64.urlsafe_b64encode(
-        json.dumps({"sub": "test", "exp": int(time.time()) + 3600}).encode()
+        json.dumps({"sub": "test", "tenant_id": tenant_id, "exp": int(time.time()) + 3600}).encode()
     ).rstrip(b"=").decode()
     sig = base64.urlsafe_b64encode(
         hmac.new(secret.encode(), f"{hdr}.{payload}".encode(), hashlib.sha256).digest()
@@ -29,7 +29,7 @@ def _make_internal_token(secret: str) -> str:
 @pytest.fixture
 def client():
     transport = ASGITransport(app=app)
-    token = _make_internal_token(INTERNAL_JWT_SECRET)
+    token = _make_internal_token(INTERNAL_JWT_SECRET, tenant_id="test-tenant")
     return AsyncClient(transport=transport, base_url="http://test", headers={"x-internal-auth": token})
 
 
