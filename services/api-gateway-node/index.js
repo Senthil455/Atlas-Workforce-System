@@ -263,6 +263,8 @@ const services = {
     process.env.SECURITY_SERVICE_URL || 'http://security-service:8050',
   ai: process.env.AI_SERVICE_URL || 'http://ai-service:8065',
   live: process.env.LIVE_SERVICE_URL || 'http://live-service:8060',
+  workforce:
+    process.env.WORKFORCE_SERVICE_URL || 'http://workforce-planning-service:8017',
 };
 
 async function resolveServiceHostnames() {
@@ -353,7 +355,13 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws', '/api/live/ws']);
+<const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+
+function isWsPath(pathname) {
+  if (ALLOWED_WS_PATHS.has(pathname)) return true;
+  if (pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/')) return true;
+  return false;
+}
 const PUBLIC_AUTH_PATHS = ['/api/auth/login', '/api/auth/register'];
 
 function isPublicPath(path) {
@@ -590,6 +598,9 @@ function authMiddleware(req, res, next) {
     '/api/ai',
     '/api/billing',
     '/api/live',
+    '/api/command-center',
+    '/api/learning',
+    '/api/workforce',
   ];
 
   const needsAuth = protectedPrefixes.some(
@@ -672,6 +683,14 @@ function rbacMiddleware(req, res, next) {
 
   if (path.startsWith('/api/billing') && !['admin', 'hr', 'manager'].includes(role)) {
     return res.status(403).json({ message: 'Forbidden: Insufficient privileges for billing' });
+  }
+
+  if (path.startsWith('/api/command-center') && !['admin', 'manager', 'hr'].includes(role)) {
+    return res.status(403).json({ message: 'Forbidden: Insufficient privileges for command center' });
+  }
+
+  if (path.startsWith('/api/workforce') && !['admin', 'hr', 'manager'].includes(role)) {
+    return res.status(403).json({ message: 'Forbidden: Insufficient privileges for workforce planning' });
   }
 
   next();
@@ -929,6 +948,10 @@ app.use('/api/security', proxyService(services.security, '/api/security', { '^/a
 app.use('/api/ai', proxyService(services.ai, '/api/ai', { '^/api/ai': '/api/v1/ai' }));
 app.use('/api/live', proxyService(services.live, '/api/live', { '^/api/live': '/api/v1/live' }));
 
+app.use('/api/command-center', proxyService(services.analytics, '/api/command-center', { '^/api/command-center': '/api/v1/command-center' }));
+app.use('/api/workforce', proxyService(services.workforce, '/api/workforce', { '^/api/workforce': '/api/v1/workforce' }));
+app.use('/api/learning', proxyService(services.lms, '/api/learning', { '^/api/learning': '/api/v1/learning' }));
+
 async function enqueueAuditRetry(payload) {
   if (!redisClient.isOpen) return;
   try {
@@ -962,9 +985,7 @@ const server = app.listen(PORT, () => {
 server.on('upgrade', (req, socket, head) => {
   const parsedUrl = new URL(req.url, 'http://localhost');
   const pathname = parsedUrl.pathname;
-  const isNotificationWs = pathname === '/ws' || pathname === '/notification/ws';
-  const isLiveWs = pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/');
-  const isWs = ALLOWED_WS_PATHS.has(pathname) || isLiveWs || isNotificationWs;
+  const isWs = isWsPath(pathname);
   if (isWs) {
     const token = parsedUrl.searchParams.get('token');
     if (!token) {
@@ -988,11 +1009,12 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
 
+    const isLive = pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/');
     let target;
-    if (isLiveWs) {
+    if (isLive) {
       target = new URL(services.live);
-      const livePath = pathname.replace(/^\/api\/live\/ws/, '/api/v1/live/ws');
-      target.pathname = livePath;
+      // /api/live/ws/{channel} -> /api/v1/live/ws/{channel}
+      target.pathname = pathname.replace(/^\/api\/live/, '/api/v1/live');
       target.search = parsedUrl.search;
     } else {
       target = new URL(services.notification);
