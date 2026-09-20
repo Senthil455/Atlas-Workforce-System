@@ -101,11 +101,11 @@ func (h *AssessmentHandler) Create(c *fiber.Ctx) error {
 		TimeLimitMinutes: req.TimeLimitMinutes,
 		Questions:        datatypes.JSON(req.Questions),
 	}
-	if assessment.PassingScore == 0 {
-		assessment.PassingScore = 70.00
-	}
 	if assessment.MaxScore == 0 {
 		assessment.MaxScore = 100.00
+	}
+	if assessment.PassingScore == 0 {
+		assessment.PassingScore = assessment.MaxScore * 0.70
 	}
 
 	if err := h.DB.Create(&assessment).Error; err != nil {
@@ -371,7 +371,21 @@ func (h *AssessmentHandler) SubmitAttempt(c *fiber.Ctx) error {
 		}
 	}
 
-	passed := totalScore >= assessment.PassingScore
+	effectiveMax := assessment.MaxScore
+	if effectiveMax == 0 {
+		effectiveMax = 100
+	}
+	var passingRatio float64
+	if assessment.PassingScore <= 100 {
+		passingRatio = assessment.PassingScore / 100.0
+	} else {
+		passingRatio = assessment.PassingScore / effectiveMax
+	}
+	actualRatio := 0.0
+	if maxScore != 0 {
+		actualRatio = totalScore / maxScore
+	}
+	passed := actualRatio >= passingRatio
 	now := time.Now()
 
 	updates := map[string]interface{}{
