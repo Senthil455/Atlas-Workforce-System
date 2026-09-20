@@ -463,7 +463,6 @@ const PUBLIC_PREFIXES = [
   '/api/auth/webauthn/authenticate/complete',
   '/api/auth/oauth/login',
   '/api/auth/oauth/callback',
-  '/api/auth/oauth/providers',
 ];
 
 function isPublicOrAuthPath(path) {
