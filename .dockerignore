@@ -1,0 +1,14 @@
+# Ignore build artifacts and local logs that should never enter image layers
+*.exe
+*.log
+*.tsbuildinfo
+.next/
+node_modules/
+.git/
+.gitignore
+README.md
+frontend/playwright-report/
+frontend/test-results/
+frontend/coverage/
+*.tmp
+*.bak

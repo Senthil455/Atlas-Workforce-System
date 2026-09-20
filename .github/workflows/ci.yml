@@ -3,6 +3,7 @@ name: Enterprise Polyglot CI
 permissions:
   contents: read
   packages: write
+  security-events: write
 
 on:
   push:
@@ -39,7 +40,6 @@ jobs:
         run: npm test
       - name: Security audit
         run: npm audit --audit-level=high
-        continue-on-error: true
       - name: Build
         run: npm run build
         env:
@@ -64,7 +64,6 @@ jobs:
         working-directory: services/${{ matrix.service }}
       - name: Security audit
         run: npm audit --audit-level=high
-        continue-on-error: true
         working-directory: services/${{ matrix.service }}
       - name: Syntax check
         run: node -c index.js
@@ -103,8 +102,13 @@ jobs:
       - name: Security scan
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -no-fail -fmt sarif -out gosec-results.sarif ./...
+          gosec -fmt sarif -out gosec-results.sarif ./...
         working-directory: services/${{ matrix.service }}
+      - name: Upload gosec results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: services/${{ matrix.service }}/gosec-results.sarif
+        if: always() && hashFiles('services/**/gosec-results.sarif') != ''
 
   python-services-check:
     name: Python Services CI
@@ -126,19 +130,22 @@ jobs:
           pip install -r requirements.txt
         working-directory: services/${{ matrix.service }}
       - name: Install linting tools
-        run: pip install flake8 pytest pytest-asyncio httpx bandit
+        run: pip install flake8 pytest pytest-asyncio httpx bandit sarif-om jschema-to-python
         working-directory: services/${{ matrix.service }}
       - name: Syntax check
         run: python -m py_compile main.py
         working-directory: services/${{ matrix.service }}
       - name: Lint Python
-        run: flake8 . --max-line-length=120
-        continue-on-error: true
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --max-line-length=120
         working-directory: services/${{ matrix.service }}
       - name: Security scan
-        run: bandit -r . --severity high
+        run: bandit -r . -f sarif -o bandit-results.sarif --severity-level high
         working-directory: services/${{ matrix.service }}
-        continue-on-error: true
+      - name: Upload bandit results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: services/${{ matrix.service }}/bandit-results.sarif
+        if: always() && hashFiles('services/**/bandit-results.sarif') != ''
       - name: Set test environment variables
         run: |
           echo "RABBITMQ_USER=guest" >> $GITHUB_ENV
@@ -362,6 +369,99 @@ jobs:
               print(f"  node: {sorted(node_matrix)}")
           PY
 
+  guard-against-binaries:
+    name: Guard Against Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for tracked binaries and logs
+        run: |
+          echo "Checking for tracked .exe, .log, tsbuildinfo files..."
+          if git ls-files | grep -E '\.exe$|\.log$|tsbuildinfo'; then
+            echo "ERROR: Tracked binaries/logs found. Run: git rm --cached <file> and ensure .gitignore covers it."
+            exit 1
+          fi
+          echo "Checking for large files >1MB..."
+          # Find files >1MB not in .git or node_modules
+          large=$(find . -type f -not -path "./.git/*" -not -path "*/node_modules/*" -not -path "./.next/*" -size +1M 2>/dev/null | head -n 20)
+          if [ -n "$large" ]; then
+            echo "ERROR: Large files found (>1MB):"
+            echo "$large"
+            echo "Please remove them and add to .gitignore"
+            exit 1
+          fi
+          echo "No tracked binaries/logs or large files found."
+
+  e2e-tests:
+    name: E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Build frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080/api
+      # For a full stack run, uncomment the docker compose step below and let webServer reuse the existing server:
+      # - name: Start full stack
+      #   run: docker compose up -d --build && ./scripts/wait-for-health.sh
+      - name: Run Playwright tests
+        run: npx playwright test --project=chromium
+        env:
+          E2E_USER: admin@atlas.io
+          E2E_PASS: ChangeMe123!
+          CI: true
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results
+          retention-days: 7
+
+  k6-performance:
+    name: K6 Performance (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup k6
+        run: |
+          curl -s https://packagecloud.io/install/repositories/grafana/k6/script.deb.sh | sudo bash
+          sudo apt-get install -y k6
+      - name: Run k6 smoke test
+        run: k6 run tests/performance/k6-smoke.js
+        env:
+          BASE_URL: http://localhost:8080
+          AUTH_URL: http://localhost:8010
+          EMPLOYEE_URL: http://localhost:8001
+          PAYROLL_URL: http://localhost:8002
+          ANALYTICS_URL: http://localhost:8003
+          ATTENDANCE_URL: http://localhost:8005
+          LEAVE_URL: http://localhost:8006
+          ATS_URL: http://localhost:8012
+          LMS_URL: http://localhost:8013
+          COPILOT_URL: http://localhost:8015
+          AUDIT_URL: http://localhost:8011
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -376,7 +476,6 @@ jobs:
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
           exit-code: 1
-        continue-on-error: true
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:

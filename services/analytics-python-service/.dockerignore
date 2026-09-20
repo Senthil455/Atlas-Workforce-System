@@ -18,3 +18,8 @@ coverage.xml
 .github
 Dockerfile
 .dockerignore
+
+*.exe
+*.log
+*.tsbuildinfo
+

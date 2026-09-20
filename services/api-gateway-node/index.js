@@ -35,6 +35,16 @@ const httpRequestsInProgress = new promClient.Gauge({
   labelNames: ['method', 'path'],
 });
 
+const auditRetryQueueDepth = new promClient.Gauge({
+  name: 'atlas_audit_retry_queue_depth',
+  help: 'Depth of audit retry queue',
+});
+
+const auditRetryDlqDepth = new promClient.Gauge({
+  name: 'atlas_audit_retry_dlq_depth',
+  help: 'Depth of audit retry DLQ',
+});
+
 promClient.collectDefaultMetrics();
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://redis:6379';
@@ -85,7 +95,13 @@ async function checkCache(req, res, next) {
       if (lockAcquired) {
         const originalSend = res.send.bind(res);
         res.send = function (body) {
-          redisClient.setEx(key, 300, typeof body === 'string' ? body : JSON.stringify(body)).catch(() => {});
+          // Only cache successful 2xx responses; errors (4xx/5xx) must not be cached
+          const status = res.statusCode;
+          const cacheControl = res.getHeader('Cache-Control');
+          const shouldCache = status >= 200 && status < 300 && cacheControl !== 'no-store';
+          if (shouldCache) {
+            redisClient.setEx(key, 300, typeof body === 'string' ? body : JSON.stringify(body)).catch(() => {});
+          }
           redisClient.del(lockKey).catch(() => {});
           return originalSend(body);
         };
@@ -411,6 +427,7 @@ function auditProxyMiddleware(req, res, next) {
       user_agent: req.headers['user-agent'],
       device_id: req.headers['x-device-id'] || null,
       session_id: req.headers['x-session-id'] || null,
+      correlation_id: req.headers['x-correlation-id'] || null,
       status_code: res.statusCode,
       timestamp: new Date().toISOString(),
       service: 'api-gateway'
@@ -744,16 +761,23 @@ app.use(csrfMiddleware);
 
 function cacheInvalidationMiddleware(req, res, next) {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-    res.on('finish', () => {
+    res.on('finish', async () => {
       if (res.statusCode < 400 && redisClient.isOpen) {
         const tenantId = req.user?.tenant_id || 'public';
         const userScope = req.user ? `${req.user.id}:${tenantId}:*` : `public:public:*`;
         const pattern = `cache:${userScope}:*`;
-        redisClient.keys(pattern).then((keys) => {
-          if (keys.length > 0) {
-            redisClient.del(keys).catch((err) => console.error('Cache invalidation error:', err));
-          }
-        }).catch((err) => console.error('Cache key scan error:', err));
+        try {
+          let cursor = 0;
+          do {
+            const reply = await redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+            cursor = reply.cursor;
+            if (reply.keys.length > 0) {
+              await redisClient.del(reply.keys);
+            }
+          } while (cursor !== 0);
+        } catch (err) {
+          console.error('Cache key scan error:', err);
+        }
       }
     });
   }
@@ -913,6 +937,12 @@ function proxyService(target, prefix, pathRewrite) {
       proxyReq(proxyReq, req) {
         const correlationId = req.headers['x-correlation-id'] || crypto.randomUUID();
         proxyReq.setHeader('x-correlation-id', correlationId);
+        // Overwrite tenant header with verified claim so downstream cannot be spoofed
+        const tenantId = req.headers['x-tenant-id'] || req.headers['X-Tenant-Id'] || req.user?.tenant_id;
+        if (tenantId) {
+          proxyReq.setHeader('x-tenant-id', tenantId);
+          proxyReq.setHeader('X-Tenant-Id', tenantId);
+        }
       }
     }
   });
@@ -927,6 +957,10 @@ function proxyService(target, prefix, pathRewrite) {
       };
       const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET, { algorithm: 'HS256' });
       req.headers['x-internal-auth'] = internalToken;
+      // Overwrite client-supplied tenant header with verified claim
+      const tenantId = req.user.tenant_id || 'default';
+      req.headers['x-tenant-id'] = tenantId;
+      req.headers['X-Tenant-Id'] = tenantId;
     }
     req.url = prefix + req.url;
     checkCache(req, res, (err) => {
@@ -964,31 +998,148 @@ app.use('/api/command-center', proxyService(services.analytics, '/api/command-ce
 app.use('/api/workforce', proxyService(services.workforce, '/api/workforce', { '^/api/workforce': '/api/v1/workforce' }));
 app.use('/api/learning', proxyService(services.lms, '/api/learning', { '^/api/learning': '/api/v1/learning' }));
 
+const AUDIT_RETRY_QUEUE = 'audit_retry_queue';
+const AUDIT_RETRY_PROCESSING = 'audit_retry_processing';
+const AUDIT_RETRY_DLQ = 'audit_retry_dlq';
+const MAX_AUDIT_RETRY_ATTEMPTS = 10;
+const MAX_AUDIT_QUEUE_SIZE = 10000;
+
+async function updateAuditQueueMetrics() {
+  if (!redisClient.isOpen) return;
+  try {
+    const depth = await redisClient.lLen(AUDIT_RETRY_QUEUE);
+    auditRetryQueueDepth.set(depth);
+    const dlqDepth = await redisClient.lLen(AUDIT_RETRY_DLQ);
+    auditRetryDlqDepth.set(dlqDepth);
+  } catch {}
+}
+setInterval(updateAuditQueueMetrics, 15000);
+
 async function enqueueAuditRetry(payload) {
   if (!redisClient.isOpen) return;
   try {
-    await redisClient.rPush('audit_retry_queue', JSON.stringify(payload));
+    const depth = await redisClient.lLen(AUDIT_RETRY_QUEUE);
+    auditRetryQueueDepth.set(depth);
+    if (depth >= MAX_AUDIT_QUEUE_SIZE) {
+      console.error('Audit retry queue full, dropping event', {
+        event_type: payload.event_type,
+        path: payload.path,
+        correlation_id: payload.correlation_id || payload.device_id,
+        queueDepth: depth,
+      });
+      return;
+    }
+    const toStore = {
+      ...payload,
+      _attempts: 0,
+      _firstEnqueuedAt: Date.now(),
+      _nextRetryAt: Date.now(),
+    };
+    if (!toStore.correlation_id) {
+      toStore.correlation_id = payload.correlation_id || payload.headers?.['x-correlation-id'] || `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    await redisClient.rPush(AUDIT_RETRY_QUEUE, JSON.stringify(toStore));
+    const newDepth = await redisClient.lLen(AUDIT_RETRY_QUEUE);
+    auditRetryQueueDepth.set(newDepth);
+    if (newDepth >= MAX_AUDIT_QUEUE_SIZE * 0.8) {
+      console.warn('Audit retry queue growing', { queueDepth: newDepth });
+    }
   } catch (err) {
     console.error('Failed to enqueue audit retry:', err.message);
   }
 }
 
-setInterval(async () => {
+let isDrainingAuditQueue = false;
+async function drainAuditRetryQueue() {
+  if (isDrainingAuditQueue) return;
   if (!redisClient.isOpen) return;
+  isDrainingAuditQueue = true;
   try {
     while (true) {
-      const item = await redisClient.lPop('audit_retry_queue');
+      let item;
+      try {
+        if (typeof redisClient.lMove === 'function') {
+          item = await redisClient.lMove(AUDIT_RETRY_QUEUE, AUDIT_RETRY_PROCESSING, 'RIGHT', 'LEFT');
+        } else if (typeof redisClient.rPopLPush === 'function') {
+          item = await redisClient.rPopLPush(AUDIT_RETRY_QUEUE, AUDIT_RETRY_PROCESSING);
+        } else {
+          item = await redisClient.lPop(AUDIT_RETRY_QUEUE);
+          if (item) {
+            await redisClient.rPush(AUDIT_RETRY_PROCESSING, item);
+          }
+        }
+      } catch (e) {
+        item = await redisClient.lPop(AUDIT_RETRY_QUEUE);
+        if (item) await redisClient.rPush(AUDIT_RETRY_PROCESSING, item);
+      }
       if (!item) break;
-      const payload = JSON.parse(item);
-      await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, payload, {
-        headers: { 'X-Internal-Key': AUDIT_INTERNAL_KEY },
-        timeout: 2000
-      });
+
+      let payload;
+      try {
+        payload = JSON.parse(item);
+      } catch {
+        await redisClient.lRem(AUDIT_RETRY_PROCESSING, 1, item);
+        continue;
+      }
+
+      const attempts = (payload._attempts || 0) + 1;
+      const nextRetryAt = payload._nextRetryAt || 0;
+      if (nextRetryAt && Date.now() < nextRetryAt) {
+        await redisClient.lRem(AUDIT_RETRY_PROCESSING, 1, item);
+        await redisClient.rPush(AUDIT_RETRY_QUEUE, item);
+        break;
+      }
+
+      if (attempts > MAX_AUDIT_RETRY_ATTEMPTS) {
+        console.error('Audit event discarded after max retries', {
+          event_type: payload.event_type,
+          path: payload.path,
+          attempts,
+          correlation_id: payload.correlation_id,
+          firstEnqueuedAt: payload._firstEnqueuedAt,
+        });
+        await redisClient.lRem(AUDIT_RETRY_PROCESSING, 1, item);
+        try {
+          await redisClient.rPush(AUDIT_RETRY_DLQ, JSON.stringify({ ...payload, _attempts: attempts, _discardedAt: Date.now() }));
+        } catch {}
+        continue;
+      }
+
+      try {
+        await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, payload, {
+          headers: { 'X-Internal-Key': AUDIT_INTERNAL_KEY },
+          timeout: 2000,
+        });
+        await redisClient.lRem(AUDIT_RETRY_PROCESSING, 1, item);
+      } catch (err) {
+        console.error('Audit retry failed, requeueing', {
+          event_type: payload.event_type,
+          attempts,
+          correlation_id: payload.correlation_id,
+          error: err.message,
+        });
+        await redisClient.lRem(AUDIT_RETRY_PROCESSING, 1, item);
+        const backoffMs = Math.min(60000, 1000 * Math.pow(2, attempts - 1));
+        const nextPayload = {
+          ...payload,
+          _attempts: attempts,
+          _nextRetryAt: Date.now() + backoffMs,
+          _lastError: err.message,
+        };
+        await redisClient.rPush(AUDIT_RETRY_QUEUE, JSON.stringify(nextPayload));
+        await new Promise((r) => setTimeout(r, Math.min(backoffMs, 1000)));
+      }
     }
   } catch (err) {
     console.error('Audit retry queue processing error:', err.message);
+  } finally {
+    isDrainingAuditQueue = false;
+    updateAuditQueueMetrics().catch(() => {});
   }
-}, 5000);
+}
+
+setInterval(drainAuditRetryQueue, 5000);
+setTimeout(drainAuditRetryQueue, 5000);
 
 const server = app.listen(PORT, () => {
   console.log(`API Gateway listening on port ${PORT}`);
