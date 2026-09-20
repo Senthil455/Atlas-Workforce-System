@@ -471,6 +471,7 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8080/api}
+      - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
     networks:
       - atlas-network
     depends_on:

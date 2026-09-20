@@ -3,6 +3,30 @@ const USER_KEY = "atlas_user";
 let inMemoryToken: string | null = null;
 let _initialized = false;
 
+function isTokenExpired(token: string): boolean {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return true;
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    // pad base64 string for atob/Buffer compatibility
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    let json: string;
+    if (typeof atob === "function") {
+      json = atob(padded);
+    } else {
+      // Node fallback (e.g. during SSR)
+      json = Buffer.from(padded, "base64").toString("utf-8");
+    }
+    const payload = JSON.parse(json);
+    if (typeof payload.exp === "number") {
+      return Date.now() >= payload.exp * 1000;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export function getAccessToken(): string | null {
   return inMemoryToken;
 }
@@ -23,10 +47,16 @@ export async function initializeAuth(): Promise<boolean> {
   try {
     const res = await fetch("/api/auth/token");
     const data = await res.json();
-    if (data.token) {
+    if (data.token && !isTokenExpired(data.token)) {
       inMemoryToken = data.token;
       _initialized = true;
       return true;
+    }
+    // token missing or expired - ensure we do not keep stale user
+    if (data.token && isTokenExpired(data.token)) {
+      clearAuth();
+      // try to clear server cookie as well
+      fetch("/api/auth/clear-cookie", { method: "POST" }).catch(() => {});
     }
   } catch {
     // network error — proceed as unauthenticated
@@ -55,5 +85,8 @@ export function getStoredUser<T>(): T | null {
 }
 
 export function isAuthenticated(): boolean {
-  return !!getAccessToken();
+  const token = getAccessToken();
+  if (!token) return false;
+  if (isTokenExpired(token)) return false;
+  return true;
 }
