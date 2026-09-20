@@ -17,7 +17,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import pymongo.errors
 from contextlib import asynccontextmanager
 import pika
-from atlas_observability import AtlasMetricsMiddleware, SecurityHeadersMiddleware, sanitize_url
+from fastapi.responses import JSONResponse
+
+from atlas_observability import AtlasMetricsMiddleware, SecurityHeadersMiddleware, sanitize_url, verify_internal_auth
 
 # ------------------------------------------------
 # Structured Logger
@@ -62,7 +64,7 @@ MONGO_URL = os.environ.get(
 )
 DB_NAME = "atlas_db"
 
-INTERNAL_KEY = os.environ.get("INTERNAL_KEY", "")
+INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "")
 
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "")
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
@@ -116,6 +118,28 @@ app.add_middleware(AtlasMetricsMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
 
+@app.middleware("http")
+async def internal_auth_middleware(request: Request, call_next):
+    if request.url.path in ("/health", "/metrics"):
+        return await call_next(request)
+
+    auth_header = request.headers.get("x-internal-auth")
+    if not auth_header:
+        return JSONResponse(status_code=401, content={"error": "Missing internal authentication"})
+
+    try:
+        claims = verify_internal_auth(request, INTERNAL_JWT_SECRET)
+        request.state.tenant_id = claims.get("tenant_id", "default")
+        request.state.user_id = claims.get("user_id", "")
+        request.state.user_role = claims.get("user_role", "employee")
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception:
+        return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
+
+    return await call_next(request)
+
+
 # ------------------------------------------------
 # Input Validation
 # ------------------------------------------------
@@ -134,12 +158,8 @@ def validate_search_param(search: Optional[str]) -> Optional[str]:
 # ------------------------------------------------
 # Auth Helpers
 # ------------------------------------------------
-async def verify_internal_key(request: Request):
-    x_internal_key = request.headers.get("X-Internal-Key")
-    if not x_internal_key or not hmac.compare_digest(x_internal_key, INTERNAL_KEY):
-        log_event("warning", "auth.invalid_internal_key")
-        raise HTTPException(status_code=403, detail="Invalid or missing internal key")
-    return x_internal_key
+# verify_internal_key removed - all endpoints now require x-internal-auth JWT
+# tenant is bound from verified claims (request.state.tenant_id) instead of X-Tenant-Id header
 
 
 # ------------------------------------------------
@@ -255,14 +275,15 @@ async def health_check():
 
 @app.get("/employees", response_model=PaginatedEmployees, tags=["employees"], summary="List all employees")
 async def get_employees(
+    request: Request,
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(10, ge=1, le=100, description="Items per page"),
     search: Optional[str] = Query(None, description="Search by name, email, department, or position"),
-    x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
 ):
     """Retrieve a paginated, searchable list of employees scoped to a tenant."""
+    tenant_id = getattr(request.state, "tenant_id", "default")
     search = validate_search_param(search)
-    query = {"tenant_id": x_tenant_id}
+    query = {"tenant_id": tenant_id}
     if search:
         pattern = re.compile(re.escape(search), re.IGNORECASE)
         query["$or"] = [{field: pattern} for field in ALLOWED_SEARCH_FIELDS]
@@ -287,9 +308,10 @@ async def get_employees(
 
 
 @app.get("/employees/{email}", response_model=EmployeeSchema, tags=["employees"], summary="Get employee by email")
-async def get_employee(email: str, x_tenant_id: str = Header("default", alias="X-Tenant-Id")):
+async def get_employee(request: Request, email: str):
     """Fetch a single employee by their email address within a tenant scope."""
-    employee = await employees_collection.find_one({"email": email, "tenant_id": x_tenant_id})
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    employee = await employees_collection.find_one({"email": email, "tenant_id": tenant_id})
     if employee:
         return serialize_employee(employee)
     await asyncio.sleep(random.uniform(0, 0.05))
@@ -298,19 +320,20 @@ async def get_employee(email: str, x_tenant_id: str = Header("default", alias="X
 
 @app.post("/employees", response_model=EmployeeSchema, tags=["employees"], summary="Create employee")
 async def create_employee(
+    request: Request,
     employee: EmployeeSchema = Body(...),
-    x_tenant_id: str = Header("default", alias="X-Tenant-Id")
 ):
     """Create a new employee record. Email must be unique per tenant."""
+    tenant_id = getattr(request.state, "tenant_id", "default")
     employee_dict = employee.model_dump(by_alias=True, exclude_none=True)
-    employee_dict["tenant_id"] = x_tenant_id
+    employee_dict["tenant_id"] = tenant_id
 
     try:
         result = await employees_collection.insert_one(employee_dict)
         employee_dict["_id"] = str(result.inserted_id)
         return employee_dict
     except pymongo.errors.DuplicateKeyError:
-        log_event("warning", "employee.duplicate_email", email=employee.email, tenant_id=x_tenant_id)
+        log_event("warning", "employee.duplicate_email", email=employee.email, tenant_id=tenant_id)
         raise HTTPException(
             status_code=400, detail="Employee with this email already exists"
         )
@@ -318,12 +341,13 @@ async def create_employee(
 
 @app.put("/employees/{email}", response_model=EmployeeSchema, tags=["employees"], summary="Update employee")
 async def update_employee(
+    request: Request,
     email: str,
     employee: EmployeeUpdateSchema = Body(...),
-    x_tenant_id: str = Header("default", alias="X-Tenant-Id")
 ):
     """Update an existing employee's details. Email change is validated for uniqueness."""
-    existing = await employees_collection.find_one({"email": email, "tenant_id": x_tenant_id})
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    existing = await employees_collection.find_one({"email": email, "tenant_id": tenant_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Employee not found")
 
@@ -333,31 +357,31 @@ async def update_employee(
 
     if "email" in update_data and update_data["email"] != email:
         duplicate = await employees_collection.find_one(
-            {"email": update_data["email"], "tenant_id": x_tenant_id}
+            {"email": update_data["email"], "tenant_id": tenant_id}
         )
         if duplicate:
             raise HTTPException(status_code=400, detail="Email already in use")
 
     await employees_collection.update_one(
-        {"email": email, "tenant_id": x_tenant_id},
+        {"email": email, "tenant_id": tenant_id},
         {"$set": update_data}
     )
 
-    updated = await employees_collection.find_one({"email": update_data.get("email", email), "tenant_id": x_tenant_id})
+    updated = await employees_collection.find_one({"email": update_data.get("email", email), "tenant_id": tenant_id})
     return serialize_employee(updated)
 
 
 @app.delete("/employees/{email}", tags=["employees"], summary="Delete employee")
 async def delete_employee(
+    request: Request,
     email: str,
-    x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
-    _: Optional[str] = Depends(verify_internal_key),
 ):
     """Permanently delete an employee record."""
-    result = await employees_collection.delete_one({"email": email, "tenant_id": x_tenant_id})
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    result = await employees_collection.delete_one({"email": email, "tenant_id": tenant_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Employee not found")
-    await publish_delete_event(email, x_tenant_id)
+    await publish_delete_event(email, tenant_id)
     return {"message": "Employee deleted successfully"}
 
 

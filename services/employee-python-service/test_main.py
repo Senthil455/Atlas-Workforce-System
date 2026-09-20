@@ -1,9 +1,33 @@
 """Tests for the Employee Service API using FastAPI TestClient."""
 
+import base64
+import hashlib
+import hmac
+import json
+import os
+import time
+
+os.environ.setdefault("INTERNAL_JWT_SECRET", "test-secret")
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import ASGITransport, AsyncClient
 from main import app
+
+INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "test-secret")
+
+
+def _make_internal_token(secret: str, tenant_id: str = "test-tenant") -> str:
+    hdr = base64.urlsafe_b64encode(
+        json.dumps({"alg": "HS256", "typ": "JWT"}).encode()
+    ).rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"sub": "test", "tenant_id": tenant_id, "exp": int(time.time()) + 3600}).encode()
+    ).rstrip(b"=").decode()
+    sig = base64.urlsafe_b64encode(
+        hmac.new(secret.encode(), f"{hdr}.{payload}".encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    return f"{hdr}.{payload}.{sig}"
 
 
 class AsyncCursorMock:
@@ -39,7 +63,8 @@ class AsyncCursorMock:
 @pytest.fixture
 def client():
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    token = _make_internal_token(INTERNAL_JWT_SECRET, tenant_id="test-tenant")
+    return AsyncClient(transport=transport, base_url="http://test", headers={"x-internal-auth": token})
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +93,7 @@ async def test_health_check(client):
 
 @pytest.mark.asyncio
 async def test_get_employees_empty(client):
-    response = await client.get("/employees", headers={"X-Tenant-Id": "test-tenant"})
+    response = await client.get("/employees")
     assert response.status_code == 200
     data = response.json()
     assert "items" in data
@@ -81,7 +106,6 @@ async def test_get_employees_empty(client):
 async def test_get_employees_pagination(client):
     response = await client.get(
         "/employees?page=1&page_size=5",
-        headers={"X-Tenant-Id": "test-tenant"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -93,7 +117,6 @@ async def test_get_employees_pagination(client):
 async def test_get_nonexistent_employee(client):
     response = await client.get(
         "/employees/nonexistent@test.com",
-        headers={"X-Tenant-Id": "test-tenant"},
     )
     assert response.status_code == 404
     assert response.json()["detail"] == "Employee not found"
@@ -103,7 +126,6 @@ async def test_get_nonexistent_employee(client):
 async def test_invalid_page_param(client):
     response = await client.get(
         "/employees?page=0",
-        headers={"X-Tenant-Id": "test-tenant"},
     )
     assert response.status_code == 422
 
@@ -112,8 +134,43 @@ async def test_invalid_page_param(client):
 async def test_employees_with_search(client):
     response = await client.get(
         "/employees?search=engineering",
-        headers={"X-Tenant-Id": "test-tenant"},
     )
     assert response.status_code == 200
     data = response.json()
     assert "items" in data
+
+
+@pytest.mark.asyncio
+async def test_get_employees_requires_auth():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as unauth:
+        response = await unauth.get("/employees")
+        assert response.status_code == 401
+        assert "Missing internal authentication" in response.json().get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_post_employees_requires_auth():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as unauth:
+        response = await unauth.post(
+            "/employees",
+            json={"name": "x", "department": "y", "position": "z", "email": "x@y.io"},
+        )
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_ignores_header(client, mock_mongodb):
+    # Client token is for tenant-a, but header tries to force tenant-b
+    token_b = _make_internal_token(INTERNAL_JWT_SECRET, tenant_id="tenant-a")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"x-internal-auth": token_b, "X-Tenant-Id": "tenant-b"}
+    ) as c:
+        await c.get("/employees")
+        # Verify query used tenant-a from token, not tenant-b from header
+        assert mock_mongodb.count_documents.called
+        call_kwargs = mock_mongodb.count_documents.call_args[0][0] if mock_mongodb.count_documents.call_args else {}
+        # count_documents called with query dict containing tenant_id
+        assert call_kwargs.get("tenant_id") == "tenant-a"

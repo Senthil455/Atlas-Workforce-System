@@ -219,10 +219,11 @@ services:
       dockerfile: services/employee-python-service/Dockerfile
     container_name: atlas-employee-service
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     environment:
       - MONGO_URL=mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-changeme_mongo_pass}@mongodb:27017/${MONGO_DB:-atlas_db}?authSource=admin
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
     networks:
       - atlas-network
     depends_on:
