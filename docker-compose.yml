@@ -167,6 +167,8 @@ services:
       - EMPLOYEE_LIFECYCLE_SERVICE_URL=http://employee-lifecycle-service:8020
       - SECURITY_SERVICE_URL=http://security-service:8050
       - AI_SERVICE_URL=http://ai-service:8065
+      - LIVE_SERVICE_URL=http://live-service:8060
+      - WORKFORCE_SERVICE_URL=http://workforce-planning-service:8017
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
       - SLACK_WEBHOOK_SECRET=${SLACK_WEBHOOK_SECRET:-}
@@ -187,6 +189,8 @@ services:
       - ai-service
       - security-service
       - employee-lifecycle-service
+      - live-service
+      - workforce-planning-service
 
   auth-service:
     build: ./services/auth-service
@@ -420,6 +424,41 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     networks:
       - atlas-network
+
+  live-service:
+    build:
+      context: .
+      dockerfile: services/live-service/Dockerfile
+    container_name: atlas-live-service
+    ports:
+      - "8060:8060"
+    environment:
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      - PORT=8060
+    networks:
+      - atlas-network
+    depends_on:
+      - rabbitmq
+
+  workforce-planning-service:
+    build:
+      context: .
+      dockerfile: services/workforce-planning-service/Dockerfile
+    container_name: atlas-workforce-planning-service
+    ports:
+      - "8017:8017"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - PORT=8017
+    networks:
+      - atlas-network
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
     build: ./frontend
