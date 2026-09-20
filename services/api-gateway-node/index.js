@@ -85,7 +85,13 @@ async function checkCache(req, res, next) {
       if (lockAcquired) {
         const originalSend = res.send.bind(res);
         res.send = function (body) {
-          redisClient.setEx(key, 300, typeof body === 'string' ? body : JSON.stringify(body)).catch(() => {});
+          // Only cache successful 2xx responses; errors (4xx/5xx) must not be cached
+          const status = res.statusCode;
+          const cacheControl = res.getHeader('Cache-Control');
+          const shouldCache = status >= 200 && status < 300 && cacheControl !== 'no-store';
+          if (shouldCache) {
+            redisClient.setEx(key, 300, typeof body === 'string' ? body : JSON.stringify(body)).catch(() => {});
+          }
           redisClient.del(lockKey).catch(() => {});
           return originalSend(body);
         };
@@ -744,16 +750,23 @@ app.use(csrfMiddleware);
 
 function cacheInvalidationMiddleware(req, res, next) {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-    res.on('finish', () => {
+    res.on('finish', async () => {
       if (res.statusCode < 400 && redisClient.isOpen) {
         const tenantId = req.user?.tenant_id || 'public';
         const userScope = req.user ? `${req.user.id}:${tenantId}:*` : `public:public:*`;
         const pattern = `cache:${userScope}:*`;
-        redisClient.keys(pattern).then((keys) => {
-          if (keys.length > 0) {
-            redisClient.del(keys).catch((err) => console.error('Cache invalidation error:', err));
-          }
-        }).catch((err) => console.error('Cache key scan error:', err));
+        try {
+          let cursor = 0;
+          do {
+            const reply = await redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+            cursor = reply.cursor;
+            if (reply.keys.length > 0) {
+              await redisClient.del(reply.keys);
+            }
+          } while (cursor !== 0);
+        } catch (err) {
+          console.error('Cache key scan error:', err);
+        }
       }
     });
   }
