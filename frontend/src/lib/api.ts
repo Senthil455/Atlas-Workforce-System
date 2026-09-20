@@ -115,20 +115,44 @@ function validateResponse<T>(schema: z.ZodType<T>, data: unknown): T {
 }
 
 const loginResponseSchema = z.object({
-  token: z.string().min(1),
+  token: z.string().min(1).optional(),
+  mfa_required: z.boolean().optional(),
+  mfa_challenge_token: z.string().optional(),
   refreshToken: z.string().optional(),
+  session_id: z.string().optional(),
+  message: z.string().optional(),
+  user: z.object({
+    id: z.number(),
+    email: z.string().email(),
+    name: z.string(),
+    role: z.enum(["admin", "hr", "manager", "employee"]).optional(),
+  }).optional(),
+});
+
+const mfaValidateResponseSchema = z.object({
+  token: z.string().min(1),
+  session_id: z.string().optional(),
   user: z.object({
     id: z.number(),
     email: z.string().email(),
     name: z.string(),
     role: z.enum(["admin", "hr", "manager", "employee"]).optional(),
   }),
+  validated: z.boolean().optional(),
+  message: z.string().optional(),
 });
 
 export const authApi = {
   login: async (email: string, password: string) => {
     const res = await api.post("/auth/login", { email, password });
     return validateResponse(loginResponseSchema, res.data);
+  },
+  validateMfa: async (mfaChallengeToken: string, code: string, isBackupCode = false) => {
+    const body: Record<string, string> = { mfa_challenge_token: mfaChallengeToken };
+    if (isBackupCode) body.backup_code = code;
+    else body.token = code;
+    const res = await api.post("/auth/mfa/validate", body);
+    return validateResponse(mfaValidateResponseSchema, res.data);
   },
   register: async (data: {
     email: string;

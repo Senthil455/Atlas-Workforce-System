@@ -130,7 +130,7 @@ const app = express();
 const TRUST_PROXY_HOPS = parseInt(process.env.TRUST_PROXY_HOPS || '1', 10);
 app.set('trust proxy', TRUST_PROXY_HOPS);
 const PORT = process.env.PORT || 8080;
-const NODE_ENV = process.env.NODE_ENV || 'development';
+const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET;
 const AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY;
@@ -153,15 +153,19 @@ if (!JWT_SECRET) {
   process.exit(1);
 }
 
-if (NODE_ENV !== 'development' && (INTERNAL_JWT_SECRET === 'atlas-internal-jwt-secret-change-me' || JWT_SECRET === 'change-me-to-a-long-random-string')) {
-  console.error('FATAL: refusing to start outside development with known default secrets (INTERNAL_JWT_SECRET / JWT_SECRET); set strong values via .env');
+// Refuse known default secrets in every environment (including development).
+// The guard must not be conditional on NODE_ENV; otherwise docker-compose
+// defaults make it inert and every `docker compose up` would run with
+// forgeable secrets with zero warnings.
+if (INTERNAL_JWT_SECRET === 'atlas-internal-jwt-secret-change-me' || JWT_SECRET === 'change-me-to-a-long-random-string') {
+  console.error('FATAL: refusing to start with known default secrets (INTERNAL_JWT_SECRET / JWT_SECRET); set strong values via .env');
   process.exit(1);
 }
 
 const jwtSecret = JWT_SECRET;
 
 const MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || process.env.MFA_JWT_SECRET || JWT_SECRET;
-if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
+if (MFA_STEPUP_SECRET === JWT_SECRET) {
   console.warn('WARNING: MFA_STEPUP_SECRET is not set or equals JWT_SECRET; step-up tokens share session secret - set a dedicated secret for production');
 }
 const MFA_STEPUP_AUD = 'mfa-step-up';
@@ -670,6 +674,11 @@ async function authMiddleware(req, res, next) {
   let payload;
   try {
     payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+    // Challenge tokens are only for /mfa/validate - never for protected routes
+    if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
+      console.error('JWT auth failure: challenge token rejected for', req.path);
+      return res.status(401).json({ message: 'MFA challenge token not valid for this endpoint' });
+    }
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       console.error('JWT auth failure: token expired for', req.path);
@@ -1203,6 +1212,11 @@ server.on('upgrade', (req, socket, head) => {
     }
     try {
       const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+      if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       const internalPayload = {
         user_id: payload.id || payload.sub,
         user_role: payload.role || 'employee',

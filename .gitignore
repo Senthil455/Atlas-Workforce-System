@@ -45,3 +45,6 @@ Thumbs.db
 
 # Environment test files
 .env.test
+
+# Local docker compose override (development NODE_ENV) - not committed
+docker-compose.override.yml
