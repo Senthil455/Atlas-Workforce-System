@@ -95,7 +95,13 @@ async function checkCache(req, res, next) {
       if (lockAcquired) {
         const originalSend = res.send.bind(res);
         res.send = function (body) {
-          redisClient.setEx(key, 300, typeof body === 'string' ? body : JSON.stringify(body)).catch(() => {});
+          // Only cache successful 2xx responses; errors (4xx/5xx) must not be cached
+          const status = res.statusCode;
+          const cacheControl = res.getHeader('Cache-Control');
+          const shouldCache = status >= 200 && status < 300 && cacheControl !== 'no-store';
+          if (shouldCache) {
+            redisClient.setEx(key, 300, typeof body === 'string' ? body : JSON.stringify(body)).catch(() => {});
+          }
           redisClient.del(lockKey).catch(() => {});
           return originalSend(body);
         };
@@ -119,7 +125,7 @@ async function checkCache(req, res, next) {
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const NODE_ENV = process.env.NODE_ENV || 'development';
+const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET;
 const AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY;
@@ -142,15 +148,19 @@ if (!JWT_SECRET) {
   process.exit(1);
 }
 
-if (NODE_ENV !== 'development' && (INTERNAL_JWT_SECRET === 'atlas-internal-jwt-secret-change-me' || JWT_SECRET === 'change-me-to-a-long-random-string')) {
-  console.error('FATAL: refusing to start outside development with known default secrets (INTERNAL_JWT_SECRET / JWT_SECRET); set strong values via .env');
+// Refuse known default secrets in every environment (including development).
+// The guard must not be conditional on NODE_ENV; otherwise docker-compose
+// defaults make it inert and every `docker compose up` would run with
+// forgeable secrets with zero warnings.
+if (INTERNAL_JWT_SECRET === 'atlas-internal-jwt-secret-change-me' || JWT_SECRET === 'change-me-to-a-long-random-string') {
+  console.error('FATAL: refusing to start with known default secrets (INTERNAL_JWT_SECRET / JWT_SECRET); set strong values via .env');
   process.exit(1);
 }
 
 const jwtSecret = JWT_SECRET;
 
 const MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || process.env.MFA_JWT_SECRET || JWT_SECRET;
-if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
+if (MFA_STEPUP_SECRET === JWT_SECRET) {
   console.warn('WARNING: MFA_STEPUP_SECRET is not set or equals JWT_SECRET; step-up tokens share session secret - set a dedicated secret for production');
 }
 const MFA_STEPUP_AUD = 'mfa-step-up';
@@ -585,7 +595,7 @@ function isPublicOrAuthPath(path) {
   return PUBLIC_PREFIXES.some((p) => path === p || path.startsWith(p + '/'));
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   if (isPublicOrAuthPath(req.path)) {
     return next();
   }
@@ -636,15 +646,14 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ message: 'Authentication required' });
   }
 
+  let payload;
   try {
-    const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+    payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
     // Challenge tokens are only for /mfa/validate - never for protected routes
     if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
       console.error('JWT auth failure: challenge token rejected for', req.path);
       return res.status(401).json({ message: 'MFA challenge token not valid for this endpoint' });
     }
-    req.user = payload;
-    next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       console.error('JWT auth failure: token expired for', req.path);
@@ -661,6 +670,27 @@ function authMiddleware(req, res, next) {
     console.error('JWT auth failure: unknown error', err.message, 'for', req.path);
     return res.status(401).json({ message: 'Invalid or expired token' });
   }
+
+  // Check denylist for revoked sessions / logged-out tokens (added by auth-service on revoke/logout)
+  if (redisClient.isOpen && payload) {
+    try {
+      const checks = [];
+      if (payload.jti) checks.push(redisClient.get(`denylist:jti:${payload.jti}`).then(v => v ? 'jti' : null));
+      if (payload.sid) checks.push(redisClient.get(`denylist:sid:${payload.sid}`).then(v => v ? 'sid' : null));
+      if (checks.length) {
+        const results = await Promise.all(checks);
+        if (results.some(Boolean)) {
+          console.error('JWT auth failure: token denylisted for', req.path, payload.jti || payload.sid);
+          return res.status(401).json({ message: 'Session revoked' });
+        }
+      }
+    } catch (e) {
+      console.error('Denylist check failed, allowing request', e.message);
+    }
+  }
+
+  req.user = payload;
+  next();
 }
 
 app.use(authMiddleware);
@@ -760,16 +790,23 @@ app.use(csrfMiddleware);
 
 function cacheInvalidationMiddleware(req, res, next) {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-    res.on('finish', () => {
+    res.on('finish', async () => {
       if (res.statusCode < 400 && redisClient.isOpen) {
         const tenantId = req.user?.tenant_id || 'public';
         const userScope = req.user ? `${req.user.id}:${tenantId}:*` : `public:public:*`;
         const pattern = `cache:${userScope}:*`;
-        redisClient.keys(pattern).then((keys) => {
-          if (keys.length > 0) {
-            redisClient.del(keys).catch((err) => console.error('Cache invalidation error:', err));
-          }
-        }).catch((err) => console.error('Cache key scan error:', err));
+        try {
+          let cursor = 0;
+          do {
+            const reply = await redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+            cursor = reply.cursor;
+            if (reply.keys.length > 0) {
+              await redisClient.del(reply.keys);
+            }
+          } while (cursor !== 0);
+        } catch (err) {
+          console.error('Cache key scan error:', err);
+        }
       }
     });
   }

@@ -3,3 +3,12 @@ Dockerfile
 .git
 .github
 README.md
+
+# Ignore build artifacts and logs
+*.exe
+*.log
+*.tsbuildinfo
+*.tmp
+*.bak
+.next/
+

@@ -5,3 +5,8 @@ Dockerfile
 .git
 .github
 README.md
+
+*.exe
+*.log
+*.tsbuildinfo
+

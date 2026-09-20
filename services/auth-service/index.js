@@ -85,7 +85,7 @@ function metricsMiddleware(req, res, next) {
 app.use(metricsMiddleware);
 
 const PORT = process.env.PORT || 8010;
-const NODE_ENV = process.env.NODE_ENV || 'development';
+const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD;
 const ACCESS_EXPIRY = '15m';
@@ -119,15 +119,19 @@ if (!SCIM_API_KEY) {
   process.exit(1);
 }
 
-if (NODE_ENV !== 'development' && (JWT_SECRET === 'change-me-to-a-long-random-string' || ADMIN_DEFAULT_PASSWORD === 'ChangeMe123!')) {
-  console.error('FATAL: refusing to start outside development with known default secrets (JWT_SECRET / ADMIN_DEFAULT_PASSWORD); set strong values via .env');
+// Refuse known default secrets in every environment (including development).
+// The guard must not be conditional on NODE_ENV; otherwise docker-compose
+// defaults make it inert and every `docker compose up` would run with
+// forgeable secrets with zero warnings.
+if (JWT_SECRET === 'change-me-to-a-long-random-string' || ADMIN_DEFAULT_PASSWORD === 'ChangeMe123!') {
+  console.error('FATAL: refusing to start with known default secrets (JWT_SECRET / ADMIN_DEFAULT_PASSWORD); set strong values via .env');
   process.exit(1);
 }
 
 const jwtSecret = JWT_SECRET;
 
 const MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || process.env.MFA_JWT_SECRET || JWT_SECRET;
-if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
+if (MFA_STEPUP_SECRET === JWT_SECRET) {
   console.warn('WARNING: MFA_STEPUP_SECRET is not set or equals JWT_SECRET; step-up tokens share session secret - set a dedicated secret for production');
 }
 const MFA_STEPUP_AUD = 'mfa-step-up';
@@ -296,12 +300,11 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function signAccessToken(user) {
-  return jwt.sign(
-    { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id || 'default' },
-    jwtSecret,
-    { algorithm: 'HS256', expiresIn: ACCESS_EXPIRY }
-  );
+function signAccessToken(user, sessionId) {
+  const jti = uuidv4();
+  const payload = { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id || 'default', jti };
+  if (sessionId) payload.sid = String(sessionId);
+  return jwt.sign(payload, jwtSecret, { algorithm: 'HS256', expiresIn: ACCESS_EXPIRY });
 }
 
 function signMfaToken(user) {
@@ -376,10 +379,15 @@ async function verifyRefreshToken(refreshToken) {
     `SELECT rt.*, u.id, u.email, u.name, u.role, u.department, u.position, u.tenant_id
      FROM refresh_tokens rt
      JOIN users u ON u.id = rt.user_id
-     WHERE rt.token_hash = $1 AND rt.expires_at > NOW()`,
+     LEFT JOIN sessions s ON s.token_hash = rt.token_hash AND s.user_id = rt.user_id
+     WHERE rt.token_hash = $1 AND rt.expires_at > NOW() AND (s.is_active IS NULL OR s.is_active = true)`,
     [tokenHash]
   );
-  return result.rows[0] || null;
+  if (!result.rows[0]) return null;
+  // Also check if the session for this token is explicitly revoked
+  const sessCheck = await pool.query('SELECT is_active FROM sessions WHERE token_hash = $1 AND user_id = $2', [tokenHash, result.rows[0].id]);
+  if (sessCheck.rows[0] && sessCheck.rows[0].is_active === false) return null;
+  return result.rows[0];
 }
 
 async function revokeAllUserSessions(userId) {
@@ -936,10 +944,10 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
       });
     }
 
-    const token = signAccessToken(user);
+    const sessionId = uuidv4();
+    const token = signAccessToken(user, sessionId);
     const refreshToken = await createRefreshToken(user.id);
 
-    const sessionId = uuidv4();
     await pool.query(
       `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
@@ -1014,9 +1022,16 @@ app.post('/refresh', async (req, res) => {
       id: row.id,
       email: row.email,
       role: row.role,
+      tenant_id: row.tenant_id,
     };
-    const token = signAccessToken(user);
+    // Find the session that holds this refresh token and rotate its token_hash
+    const sessRes = await pool.query('SELECT id FROM sessions WHERE token_hash = $1 AND user_id = $2', [oldTokenHash, row.id]);
+    const sessionId = sessRes.rows[0]?.id || null;
+    const token = signAccessToken(user, sessionId);
     const newRefreshToken = await createRefreshToken(row.user_id);
+    if (sessionId) {
+      await pool.query('UPDATE sessions SET token_hash = $1 WHERE id = $2', [hashToken(newRefreshToken), sessionId]);
+    }
 
     res.cookie('refreshToken', newRefreshToken, {
       httpOnly: true,
@@ -1054,8 +1069,21 @@ app.post('/logout', async (req, res) => {
 
     if (sessionId) {
       await pool.query('UPDATE sessions SET is_active = false WHERE id = $1', [sessionId]);
+      if (redisClient.isOpen) await redisClient.set(`denylist:sid:${sessionId}`, '1', { EX: 15 * 60 });
     } else if (refreshToken) {
       await pool.query('UPDATE sessions SET is_active = false WHERE token_hash = $1', [hashToken(refreshToken)]);
+    }
+    // Denylist the current access token (if any) so it cannot be used for the next 15 minutes
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ') && redisClient.isOpen) {
+      try {
+        const token = authHeader.slice(7);
+        const payload = jwt.decode(token);
+        if (payload && payload.jti) await redisClient.set(`denylist:jti:${payload.jti}`, '1', { EX: 15 * 60 });
+        if (payload && payload.sid) await redisClient.set(`denylist:sid:${payload.sid}`, '1', { EX: 15 * 60 });
+      } catch {}
+    } else if (sessionId && redisClient.isOpen) {
+      await redisClient.set(`denylist:sid:${sessionId}`, '1', { EX: 15 * 60 });
     }
 
     res.clearCookie('refreshToken');
@@ -2085,11 +2113,36 @@ app.delete('/sessions/:id', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'UPDATE sessions SET is_active = false WHERE id = $1::uuid AND user_id = $2 RETURNING id',
+      'UPDATE sessions SET is_active = false WHERE id = $1::uuid AND user_id = $2 RETURNING token_hash',
       [req.params.id, userId]
     );
     if (!result.rows[0]) {
       return res.status(404).json({ message: 'Session not found' });
+    }
+    // Also delete the refresh token that belongs to this session so it cannot be used to refresh
+    const tokenHash = result.rows[0].token_hash;
+    if (tokenHash) {
+      await pool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [tokenHash]);
+      await pool.query('DELETE FROM rotated_tokens WHERE token_hash = $1', [tokenHash]);
+      // Optionally denylist any access tokens from this session via Redis (handled by gateway)
+      if (redisClient.isOpen) {
+        const accessJtiKey = `denylist:sid:${req.params.id}`;
+        await redisClient.set(accessJtiKey, '1', { EX: 15 * 60 });
+      }
+    }
+    // If the request supplied an access token, denylist its jti as well
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ') && redisClient.isOpen) {
+      try {
+        const token = authHeader.slice(7);
+        const payload = jwt.decode(token);
+        if (payload && payload.jti) {
+          await redisClient.set(`denylist:jti:${payload.jti}`, '1', { EX: 15 * 60 });
+        }
+        if (payload && payload.sid) {
+          await redisClient.set(`denylist:sid:${payload.sid}`, '1', { EX: 15 * 60 });
+        }
+      } catch {}
     }
     res.json({ message: 'Session revoked' });
   } catch (error) {
@@ -2103,16 +2156,39 @@ app.delete('/sessions', requireRole(), async (req, res) => {
     const userId = req.user.id;
     const currentSessionId = req.headers['x-session-id'];
 
+    let revokedHashes = [];
     if (currentSessionId) {
-      await pool.query(
-        'UPDATE sessions SET is_active = false WHERE user_id = $1 AND id != $2::uuid',
+      const resQ = await pool.query(
+        'UPDATE sessions SET is_active = false WHERE user_id = $1 AND id != $2::uuid RETURNING token_hash',
         [userId, currentSessionId]
       );
+      revokedHashes = resQ.rows.map(r => r.token_hash).filter(Boolean);
     } else {
-      await pool.query(
-        'UPDATE sessions SET is_active = false WHERE user_id = $1',
+      const resQ = await pool.query(
+        'UPDATE sessions SET is_active = false WHERE user_id = $1 RETURNING token_hash',
         [userId]
       );
+      revokedHashes = resQ.rows.map(r => r.token_hash).filter(Boolean);
+    }
+    // Delete refresh tokens for the revoked sessions
+    for (const th of revokedHashes) {
+      await pool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [th]);
+      await pool.query('DELETE FROM rotated_tokens WHERE token_hash = $1', [th]);
+      if (redisClient.isOpen) {
+        // Find session id for this hash to denylist sid
+        const sidRes = await pool.query('SELECT id FROM sessions WHERE token_hash = $1', [th]);
+        const sid = sidRes.rows[0]?.id;
+        if (sid) await redisClient.set(`denylist:sid:${sid}`, '1', { EX: 15 * 60 });
+      }
+    }
+    // Also denylist the current access token's jti/sid if provided
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ') && redisClient.isOpen) {
+      try {
+        const token = authHeader.slice(7);
+        const payload = jwt.decode(token);
+        if (payload && payload.jti) await redisClient.set(`denylist:jti:${payload.jti}`, '1', { EX: 15 * 60 });
+      } catch {}
     }
 
     await sendAuditEvent('auth.sessions_revoked', userId, req.user.email, {
