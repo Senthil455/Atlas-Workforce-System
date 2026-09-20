@@ -54,5 +54,8 @@ test:
 
 test-e2e:
 	@echo "Running Playwright End-to-End test suite..."
-	cd frontend && npx playwright test
+	cd frontend && npx playwright test --project=chromium
+
+test-all: test test-e2e
+	@echo "All tests including e2e completed."
 
