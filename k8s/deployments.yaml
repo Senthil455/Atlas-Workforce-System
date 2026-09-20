@@ -20,7 +20,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: api-gateway
-        image: atlas/api-gateway:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/api-gateway-node:latest
         ports:
         - containerPort: 8080
         securityContext:
@@ -72,7 +72,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: frontend
-        image: atlas/frontend:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/frontend:latest
         ports:
         - containerPort: 3000
         securityContext:
@@ -88,13 +88,13 @@ spec:
             memory: "256Mi"
         livenessProbe:
           httpGet:
-            path: /health
+            path: /
             port: 3000
           initialDelaySeconds: 10
           periodSeconds: 15
         readinessProbe:
           httpGet:
-            path: /health
+            path: /
             port: 3000
           initialDelaySeconds: 5
           periodSeconds: 10
@@ -121,7 +121,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: auth-service
-        image: atlas/auth-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/auth-service:latest
         ports:
         - containerPort: 8010
         securityContext:
@@ -173,7 +173,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: employee-service
-        image: atlas/employee-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/employee-python-service:latest
         ports:
         - containerPort: 8001
         securityContext:
@@ -225,7 +225,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: payroll-service
-        image: atlas/payroll-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/payroll-java-service:latest
         ports:
         - containerPort: 8002
         securityContext:
@@ -277,7 +277,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: analytics-service
-        image: atlas/analytics-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/analytics-python-service:latest
         ports:
         - containerPort: 8003
         securityContext:
@@ -329,7 +329,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: notification-service
-        image: atlas/notification-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/notification-go-service:latest
         ports:
         - containerPort: 8004
         securityContext:
@@ -381,7 +381,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: attendance-service
-        image: atlas/attendance-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/attendance-service:latest
         ports:
         - containerPort: 8005
         securityContext:
@@ -433,7 +433,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: leave-service
-        image: atlas/leave-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/leave-service:latest
         ports:
         - containerPort: 8006
         securityContext:
@@ -485,7 +485,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: audit-compliance-service
-        image: atlas/audit-compliance-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/audit-compliance-service:latest
         ports:
         - containerPort: 8011
         securityContext:
@@ -537,7 +537,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: ats-service
-        image: atlas/ats-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/ats-service:latest
         ports:
         - containerPort: 8012
         securityContext:
@@ -589,7 +589,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: lms-service
-        image: atlas/lms-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/lms-service:latest
         ports:
         - containerPort: 8013
         securityContext:
@@ -641,7 +641,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: performance-service
-        image: atlas/performance-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/performance-service:latest
         ports:
         - containerPort: 8014
         securityContext:
@@ -693,7 +693,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: ai-copilot-service
-        image: atlas/ai-copilot-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/ai-copilot-service:latest
         ports:
         - containerPort: 8015
         securityContext:
@@ -745,7 +745,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: integration-service
-        image: atlas/integration-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/integration-service:latest
         ports:
         - containerPort: 8016
         securityContext:
@@ -797,7 +797,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: employee-lifecycle-service
-        image: atlas/employee-lifecycle-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/employee-lifecycle-service:latest
         ports:
         - containerPort: 8020
         securityContext:
@@ -849,7 +849,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: security-service
-        image: atlas/security-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/security-service:latest
         ports:
         - containerPort: 8050
         securityContext:
@@ -901,7 +901,7 @@ spec:
         fsGroup: 1001
       containers:
       - name: ai-service
-        image: atlas/ai-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/ai-service:latest
         ports:
         - containerPort: 8065
         securityContext:
