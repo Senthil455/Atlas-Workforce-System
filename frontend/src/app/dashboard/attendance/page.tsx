@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToastStore } from "@/stores/toast-store";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   Clock, Clock9, Download, FileSpreadsheet, MapPin, QrCode, Smartphone,
   Camera, Fingerprint, Shield, AlertTriangle, Home, BarChart3,
@@ -88,16 +89,9 @@ function RecordsTab() {
     },
   });
 
-  const [employeeId, setEmployeeId] = useState(() => {
-    try {
-      const stored = localStorage.getItem("auth-storage");
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        return parsed?.state?.user?.email ?? "";
-      }
-    } catch {}
-    return "";
-  });
+  // Use auth store directly - persisted under "atlas-auth" (not "auth-storage")
+  const user = useAuthStore((s) => s.user);
+  const employeeId = user?.email ?? "";
 
   const getGPS = useCallback(async () => {
     if (!navigator.geolocation) return null;

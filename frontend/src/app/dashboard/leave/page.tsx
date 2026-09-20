@@ -1,8 +1,9 @@
 "use client";
 
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuthStore } from "@/stores/auth-store";
 import { leaveApi } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -53,16 +54,9 @@ export default function LeavePage() {
   const addToast = useToastStore((s) => s.toast);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [employeeId, setEmployeeId] = useState(() => {
-    try {
-      const stored = localStorage.getItem("auth-storage");
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        return parsed?.state?.user?.email ?? "";
-      }
-    } catch {}
-    return "";
-  });
+  // Use auth store directly - persisted under "atlas-auth" (not "auth-storage")
+  const user = useAuthStore((s) => s.user);
+  const employeeId = user?.email ?? "";
   const [form, setForm] = useState({
     startDate: "",
     endDate: "",
