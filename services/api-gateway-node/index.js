@@ -355,7 +355,7 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-<const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
 
 function isWsPath(pathname) {
   if (ALLOWED_WS_PATHS.has(pathname)) return true;
@@ -704,6 +704,12 @@ app.use(mfaStepUpMiddleware);
 function csrfMiddleware(req, res, next) {
   if (isPublicOrAuthPath(req.path)) return next();
 
+  // Refresh and logout are cookie-based and must not require double-submit
+  const csrfExempt = ['/api/auth/refresh', '/api/auth/logout', '/api/auth/token'];
+  if (csrfExempt.some((p) => req.path === p || req.path.startsWith(p + '/') || req.path.startsWith(p + '?'))) {
+    return next();
+  }
+
   if (req.user && !req.cookies?.csrf_token) {
     const csrfToken = crypto.randomBytes(32).toString('hex');
     res.cookie('csrf_token', csrfToken, {
@@ -718,10 +724,16 @@ function csrfMiddleware(req, res, next) {
     return next();
   }
 
-  const headerToken = req.headers['x-csrf-token'];
   const cookieToken = req.cookies?.csrf_token;
+  // Only enforce double-submit when a csrf cookie exists (browser session).
+  // Clients without a cookie jar (curl, seed scripts, k6) will not be blocked.
+  if (!cookieToken) {
+    return next();
+  }
 
-  if (!headerToken || !cookieToken || headerToken !== cookieToken) {
+  const headerToken = req.headers['x-csrf-token'];
+
+  if (!headerToken || headerToken !== cookieToken) {
     return res.status(403).json({ message: 'CSRF token validation failed' });
   }
 

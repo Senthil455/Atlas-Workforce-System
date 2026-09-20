@@ -39,10 +39,20 @@ export const api = axios.create({
   withCredentials: true,
 });
 
+function getCsrfToken(): string | null {
+  if (typeof document === 'undefined') return null;
+  const match = document.cookie.match(/(?:^|; )csrf_token=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const token = getAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  const csrf = getCsrfToken();
+  if (csrf && config.method && !['get', 'head', 'options'].includes(config.method.toLowerCase())) {
+    config.headers['x-csrf-token'] = csrf;
   }
   return config;
 });
