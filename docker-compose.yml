@@ -167,6 +167,8 @@ services:
       - SECURITY_SERVICE_URL=http://security-service:8050
       - AI_SERVICE_URL=http://ai-service:8065
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      - SLACK_WEBHOOK_SECRET=${SLACK_WEBHOOK_SECRET:-}
     networks:
       - atlas-network
     depends_on:
