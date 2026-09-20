@@ -481,9 +481,17 @@ def rotate_encryption_key(db: Session, key_id_str: str, new_data: dict) -> dict:
         return {"error": "No active key found with that key_id"}
     old_key.status = "rotated"
     old_key.rotated_at = datetime.now(timezone.utc)
+    # Generate a fresh unique key_id for the new key to avoid UNIQUE constraint violation.
+    # The old implementation reused the same key_id which always fails because key_id is unique.
+    # If the caller explicitly provides a different key_id, respect it; otherwise generate a new UUID.
+    provided_key_id = new_data.get("key_id")
+    if provided_key_id and provided_key_id != key_id_str:
+        new_key_id = provided_key_id
+    else:
+        new_key_id = str(uuid.uuid4())
     new_key = EncryptionKey(
         tenant_id=old_key.tenant_id,
-        key_id=key_id_str,
+        key_id=new_key_id,
         algorithm=new_data.get("algorithm", old_key.algorithm),
         purpose=new_data.get("purpose", old_key.purpose),
         version=old_key.version + 1,
@@ -491,9 +499,13 @@ def rotate_encryption_key(db: Session, key_id_str: str, new_data: dict) -> dict:
         expires_at=new_data.get("expires_at"),
     )
     db.add(new_key)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(new_key)
-    return {"old_key_id": str(old_key.id), "new_key_id": str(new_key.id), "version": new_key.version}
+    return {"old_key_id": str(old_key.id), "new_key_id": str(new_key.id), "new_key_key_id": new_key.key_id, "version": new_key.version}
 
 COUNTRY_CODES = {
     "US", "CA", "GB", "DE", "FR", "IT", "ES", "NL", "BE", "CH", "AT", "SE", "NO", "DK", "FI",

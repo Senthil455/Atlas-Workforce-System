@@ -26,7 +26,7 @@ from atlas_observability import (
 load_dotenv()
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
-RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
+RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://atlas_rabbit:changeme_rabbit_pass@rabbitmq:5672/")
 INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET")
 
 # ── Eviction Configuration ──────────────────────────────────────────────────

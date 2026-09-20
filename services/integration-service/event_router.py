@@ -25,7 +25,7 @@ from webhook_engine import deliver_webhook, send_audit_event
 
 logger = logging.getLogger("event-router")
 
-RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
+RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://atlas_rabbit:changeme_rabbit_pass@rabbitmq:5672/")
 RABBITMQ_EXCHANGE = "notifications_exchange"
 
 _rabbit_connection = None
