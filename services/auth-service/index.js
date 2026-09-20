@@ -85,7 +85,7 @@ function metricsMiddleware(req, res, next) {
 app.use(metricsMiddleware);
 
 const PORT = process.env.PORT || 8010;
-const NODE_ENV = process.env.NODE_ENV || 'development';
+const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD;
 const ACCESS_EXPIRY = '15m';
@@ -119,15 +119,19 @@ if (!SCIM_API_KEY) {
   process.exit(1);
 }
 
-if (NODE_ENV !== 'development' && (JWT_SECRET === 'change-me-to-a-long-random-string' || ADMIN_DEFAULT_PASSWORD === 'ChangeMe123!')) {
-  console.error('FATAL: refusing to start outside development with known default secrets (JWT_SECRET / ADMIN_DEFAULT_PASSWORD); set strong values via .env');
+// Refuse known default secrets in every environment (including development).
+// The guard must not be conditional on NODE_ENV; otherwise docker-compose
+// defaults make it inert and every `docker compose up` would run with
+// forgeable secrets with zero warnings.
+if (JWT_SECRET === 'change-me-to-a-long-random-string' || ADMIN_DEFAULT_PASSWORD === 'ChangeMe123!') {
+  console.error('FATAL: refusing to start with known default secrets (JWT_SECRET / ADMIN_DEFAULT_PASSWORD); set strong values via .env');
   process.exit(1);
 }
 
 const jwtSecret = JWT_SECRET;
 
 const MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || process.env.MFA_JWT_SECRET || JWT_SECRET;
-if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
+if (MFA_STEPUP_SECRET === JWT_SECRET) {
   console.warn('WARNING: MFA_STEPUP_SECRET is not set or equals JWT_SECRET; step-up tokens share session secret - set a dedicated secret for production');
 }
 const MFA_STEPUP_AUD = 'mfa-step-up';

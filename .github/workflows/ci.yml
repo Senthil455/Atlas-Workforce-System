@@ -249,6 +249,41 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  compose-safety-check:
+    name: Compose Safety Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify compose does not default to insecure secrets with NODE_ENV=development
+        run: |
+          python3 -c "
+          import pathlib, sys
+          text = pathlib.Path('docker-compose.yml').read_text()
+          if 'NODE_ENV:-development' in text:
+              print('FAIL: docker-compose.yml still defaults NODE_ENV to development')
+              print('The default must be production so secret guards are active on vanilla docker compose up')
+              sys.exit(1)
+          # Ensure service guards are unconditional (no NODE_ENV gate before default secret check)
+          for svc_path in ['services/api-gateway-node/index.js', 'services/auth-service/index.js']:
+              content = pathlib.Path(svc_path).read_text()
+              if \"NODE_ENV !== 'development'\" in content and 'change-me' in content.lower():
+                  print(f'FAIL: {svc_path} still gates default-secret refusal on NODE_ENV')
+                  sys.exit(1)
+          print('Static checks passed: compose defaults to production and guards are unconditional')
+          "
+          echo "Rendering docker compose config..."
+          if ! docker compose config > /tmp/rendered-compose.yml 2>&1; then
+            echo "docker compose config failed, showing output:"
+            cat /tmp/rendered-compose.yml
+            exit 1
+          fi
+          if grep -q 'change-me' /tmp/rendered-compose.yml && grep -q 'NODE_ENV.*development' /tmp/rendered-compose.yml; then
+            echo "FAIL: rendered docker-compose still emits default secrets together with NODE_ENV=development"
+            grep -n 'change-me\|NODE_ENV' /tmp/rendered-compose.yml
+            exit 1
+          fi
+          echo "Rendered compose check passed: no default secrets with development mode"
+
   e2e-tests:
     name: E2E Tests (Playwright)
     runs-on: ubuntu-latest
