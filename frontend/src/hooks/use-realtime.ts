@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { getAccessToken } from "@/lib/auth";
 
 const SSE_BASE = process.env.NEXT_PUBLIC_SSE_URL ?? "http://localhost:8080/api/live/sse";
 
@@ -23,7 +24,9 @@ export function useSSE(channel: string, enabled = true) {
 
     function connect() {
       if (!mounted) return;
-      const es = new EventSource(`${SSE_BASE}/${channel}`);
+      const token = getAccessToken();
+      const url = token ? `${SSE_BASE}/${channel}?token=${encodeURIComponent(token)}` : `${SSE_BASE}/${channel}`;
+      const es = new EventSource(url);
       eventSourceRef.current = es;
 
       es.onopen = () => {

@@ -92,7 +92,7 @@ fi
 
 # 2. Obtain auth token for service health checks
 log_info "Step 2: Obtaining auth token..."
-TOKEN=$(get_token) || { log_warn "Could not obtain auth token (services may not be up)"; TOKEN=""; }
+TOKEN=$(get_token) || { log_fail "Could not obtain auth token (services may not be up)"; TOKEN=""; }
 if [ -n "$TOKEN" ]; then
   log_ok "Auth token obtained"
 fi
@@ -166,6 +166,21 @@ if [ -n "$TOKEN" ]; then
 
   check_http_code "$API_GATEWAY/api/employee/employees?page=1&page_size=1" "200 401 403" "Employee endpoint under delay" "$TOKEN"
   check_http_code "$API_GATEWAY/api/leave" "200 401 403" "Leave endpoint under delay" "$TOKEN"
+else
+  TEST_START=$(date +%s%N)
+  DELAY_CODE=$(curl -so /dev/null -w '%{http_code}' "$API_GATEWAY/health" 2>/dev/null || echo "000")
+  TEST_END=$(date +%s%N)
+  TEST_MS=$(( (TEST_END - TEST_START) / 1000000 ))
+  log_info "  Request with delay (health) took ~${TEST_MS}ms (no token)"
+  log_info "  Response code: $DELAY_CODE"
+fi
+
+# Assert latency actually increased - otherwise tc netem was not applied
+EXPECTED_MIN=$((BASELINE_MS + DELAY_MS / 2))
+if [ "$TEST_MS" -ge "$EXPECTED_MIN" ]; then
+  log_ok "Latency increased as expected (baseline ${BASELINE_MS}ms -> ${TEST_MS}ms, expected >= ${EXPECTED_MIN}ms)"
+else
+  log_fail "Latency did not increase sufficiently (baseline ${BASELINE_MS}ms -> ${TEST_MS}ms, expected >= ${EXPECTED_MIN}ms) - tc netem may not have been applied"
 fi
 
 sleep 2

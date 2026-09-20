@@ -56,6 +56,10 @@ async function checkCache(req, res, next) {
     return next();
   }
 
+  if (req.path.startsWith('/api/live')) {
+    return next();
+  }
+
   if (!redisClient.isOpen) {
     return next();
   }
@@ -110,6 +114,8 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET;
 const AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY;
 const AUDIT_SERVICE_URL = process.env.AUDIT_COMPLIANCE_SERVICE_URL || 'http://audit-compliance-service:8011';
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
+const SLACK_WEBHOOK_SECRET = process.env.SLACK_WEBHOOK_SECRET || '';
 
 if (!INTERNAL_JWT_SECRET) {
   console.error('FATAL: INTERNAL_JWT_SECRET is required');
@@ -219,6 +225,7 @@ app.use('/api/auth/register', authLimiter);
 app.use('/api/payroll', sensitiveLimiter);
 app.use('/api/compliance', sensitiveLimiter);
 app.use('/api/audit', sensitiveLimiter);
+app.use('/api/billing', sensitiveLimiter);
 
 const services = {
   auth: process.env.AUTH_SERVICE_URL || 'http://auth-service:8010',
@@ -248,6 +255,7 @@ const services = {
   security:
     process.env.SECURITY_SERVICE_URL || 'http://security-service:8050',
   ai: process.env.AI_SERVICE_URL || 'http://ai-service:8065',
+  live: process.env.LIVE_SERVICE_URL || 'http://live-service:8060',
 };
 
 async function resolveServiceHostnames() {
@@ -338,7 +346,7 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws', '/api/live/ws']);
 const PUBLIC_AUTH_PATHS = ['/api/auth/login', '/api/auth/register'];
 
 function isPublicPath(path) {
@@ -455,12 +463,11 @@ const PUBLIC_PREFIXES = [
   '/saml/acs',
   '/saml/login',
   '/saml/metadata',
-  '/api/webhooks',
+  '/api/webhooks/slack',
   '/api/auth/webauthn/authenticate/begin',
   '/api/auth/webauthn/authenticate/complete',
   '/api/auth/oauth/login',
   '/api/auth/oauth/callback',
-  '/api/auth/oauth/providers',
 ];
 
 function isPublicOrAuthPath(path) {
@@ -489,6 +496,8 @@ function authMiddleware(req, res, next) {
     '/api/lifecycle',
     '/api/security',
     '/api/ai',
+    '/api/billing',
+    '/api/live',
   ];
 
   const needsAuth = protectedPrefixes.some(
@@ -499,13 +508,21 @@ function authMiddleware(req, res, next) {
     return next();
   }
 
+  let token = null;
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
+  if (authHeader?.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  } else if (req.path.startsWith('/api/live')) {
+    try {
+      const url = new URL(req.originalUrl || req.url, 'http://localhost');
+      token = url.searchParams.get('token');
+    } catch {}
+  }
+  if (!token) {
     return res.status(401).json({ message: 'Authentication required' });
   }
 
   try {
-    const token = authHeader.slice(7);
     const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
     req.user = payload;
     next();
@@ -559,6 +576,10 @@ function rbacMiddleware(req, res, next) {
 
   if (path.startsWith('/api/security') && !['admin', 'compliance', 'auditor'].includes(role)) {
     return res.status(403).json({ message: 'Forbidden: Insufficient privileges for security' });
+  }
+
+  if (path.startsWith('/api/billing') && !['admin', 'hr', 'manager'].includes(role)) {
+    return res.status(403).json({ message: 'Forbidden: Insufficient privileges for billing' });
   }
 
   next();
@@ -618,7 +639,76 @@ function cacheInvalidationMiddleware(req, res, next) {
 
 app.use(cacheInvalidationMiddleware);
 
-app.post('/api/webhooks/slack', express.urlencoded({ extended: true }), async (req, res) => {
+function verifySlackRequest(req) {
+  const signature = req.headers['x-slack-signature'];
+  const timestamp = req.headers['x-slack-request-timestamp'];
+
+  if (SLACK_SIGNING_SECRET && signature && timestamp) {
+    const ts = parseInt(String(timestamp), 10);
+    if (Number.isNaN(ts)) {
+      return { valid: false, reason: 'Invalid timestamp' };
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - ts) > 60 * 5) {
+      return { valid: false, reason: 'Stale timestamp' };
+    }
+    const rawBody = req.rawBody || '';
+    const baseString = `v0:${timestamp}:${rawBody}`;
+    const hmac = crypto.createHmac('sha256', SLACK_SIGNING_SECRET).update(baseString, 'utf8').digest('hex');
+    const expected = `v0=${hmac}`;
+    try {
+      const sigBuf = Buffer.from(String(signature), 'utf8');
+      const expBuf = Buffer.from(expected, 'utf8');
+      if (sigBuf.length !== expBuf.length) {
+        return { valid: false, reason: 'Invalid signature length' };
+      }
+      if (!crypto.timingSafeEqual(sigBuf, expBuf)) {
+        return { valid: false, reason: 'Invalid signature' };
+      }
+      return { valid: true };
+    } catch {
+      return { valid: false, reason: 'Signature verification failed' };
+    }
+  }
+
+  if (SLACK_WEBHOOK_SECRET) {
+    const provided = req.headers['x-slack-webhook-secret'] || req.headers['x-webhook-secret'] || req.headers['x-internal-key'];
+    if (provided) {
+      try {
+        const a = Buffer.from(String(provided), 'utf8');
+        const b = Buffer.from(SLACK_WEBHOOK_SECRET, 'utf8');
+        if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+          return { valid: true };
+        }
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  return { valid: false, reason: 'Missing or invalid Slack signature' };
+}
+
+app.post('/api/webhooks/slack', express.urlencoded({
+  extended: true,
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+}), async (req, res) => {
+  if (!SLACK_SIGNING_SECRET && !SLACK_WEBHOOK_SECRET) {
+    if (NODE_ENV !== 'development') {
+      console.error('Slack webhook rejected: no signing secret configured');
+      return res.status(503).json({ response_type: 'ephemeral', text: 'Webhook not configured' });
+    }
+    console.warn('Slack webhook verification bypassed in development (no secret configured)');
+  } else {
+    const verification = verifySlackRequest(req);
+    if (!verification.valid) {
+      console.warn(`Slack webhook auth failed: ${verification.reason}`);
+      return res.status(401).json({ response_type: 'ephemeral', text: 'Invalid webhook signature' });
+    }
+  }
+
   try {
     const { text, user_name } = req.body;
 
@@ -650,14 +740,20 @@ app.post('/api/webhooks/slack', express.urlencoded({ extended: true }), async (r
       text: `Leave request submitted for ${startDate} to ${endDate}`
     });
   } catch (err) {
-    console.error('Slack Webhook Error:', err.response?.data || err.message);
-    res.json({ response_type: "ephemeral", text: `Failed to submit leave: ${err.response?.data?.message || 'Error'}` });
+    console.error('Slack Webhook Error:', err.message);
+    res.json({ response_type: "ephemeral", text: 'Failed to submit leave request. Please try again.' });
   }
 });
 
 app.post('/api/billing/create-checkout-session', express.json(), async (req, res) => {
   try {
-    const tenantId = req.user?.tenant_id || 'default';
+    if (!req.user) {
+      return res.status(401).json({ message: 'Authentication required' });
+    }
+    const tenantId = req.user.tenant_id;
+    if (!tenantId) {
+      return res.status(400).json({ message: 'Tenant context missing' });
+    }
 
     const employeeServiceUrl = `${services.employee}/employees`;
     const response = await axios.get(employeeServiceUrl, {
@@ -739,6 +835,7 @@ app.use('/api/integration', proxyService(services.integration, '/api/integration
 app.use('/api/lifecycle', proxyService(services.lifecycle, '/api/lifecycle', { '^/api/lifecycle': '/api/v1/lifecycle' }));
 app.use('/api/security', proxyService(services.security, '/api/security', { '^/api/security': '/api/v1/security' }));
 app.use('/api/ai', proxyService(services.ai, '/api/ai', { '^/api/ai': '/api/v1/ai' }));
+app.use('/api/live', proxyService(services.live, '/api/live', { '^/api/live': '/api/v1/live' }));
 
 async function enqueueAuditRetry(payload) {
   if (!redisClient.isOpen) return;
@@ -773,7 +870,9 @@ const server = app.listen(PORT, () => {
 server.on('upgrade', (req, socket, head) => {
   const parsedUrl = new URL(req.url, 'http://localhost');
   const pathname = parsedUrl.pathname;
-  const isWs = ALLOWED_WS_PATHS.has(pathname);
+  const isNotificationWs = pathname === '/ws' || pathname === '/notification/ws';
+  const isLiveWs = pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/');
+  const isWs = ALLOWED_WS_PATHS.has(pathname) || isLiveWs || isNotificationWs;
   if (isWs) {
     const token = parsedUrl.searchParams.get('token');
     if (!token) {
@@ -797,9 +896,17 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
 
-    const target = new URL(services.notification);
-    target.pathname = '/ws';
-    target.search = parsedUrl.search;
+    let target;
+    if (isLiveWs) {
+      target = new URL(services.live);
+      const livePath = pathname.replace(/^\/api\/live\/ws/, '/api/v1/live/ws');
+      target.pathname = livePath;
+      target.search = parsedUrl.search;
+    } else {
+      target = new URL(services.notification);
+      target.pathname = '/ws';
+      target.search = parsedUrl.search;
+    }
     const proxyReq = http.request(target.toString(), { method: 'GET', headers: req.headers });
     proxyReq.on('upgrade', (proxyRes, proxySocket) => {
       socket.write('HTTP/1.1 101 Switching Protocols\r\n' +

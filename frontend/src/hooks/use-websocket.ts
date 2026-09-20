@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { getAccessToken } from "@/lib/auth";
 
 const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080/api/live/ws";
 
@@ -22,7 +23,9 @@ export function useWebSocket<T = Record<string, unknown>>(channel: string, enabl
 
     function connect() {
       if (!mounted) return;
-      const ws = new WebSocket(`${WS_BASE}/${channel}`);
+      const token = getAccessToken();
+      const url = token ? `${WS_BASE}/${channel}?token=${encodeURIComponent(token)}` : `${WS_BASE}/${channel}`;
+      const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {

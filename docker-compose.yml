@@ -2,7 +2,8 @@
 # Before deploying to production, set ALL of the following environment variables:
 #   JWT_SECRET, INTERNAL_JWT_SECRET, POSTGRES_PASSWORD, MONGO_PASSWORD,
 #   MONGO_USER, REDIS_PASSWORD, RABBITMQ_USER, RABBITMQ_PASS,
-#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY.
+#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY,
+#   OAUTH_ENCRYPTION_KEY.
 # Generate strong secrets: openssl rand -base64 64
 services:
   postgres:
@@ -125,7 +126,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
@@ -166,7 +167,10 @@ services:
       - EMPLOYEE_LIFECYCLE_SERVICE_URL=http://employee-lifecycle-service:8020
       - SECURITY_SERVICE_URL=http://security-service:8050
       - AI_SERVICE_URL=http://ai-service:8065
+      - LIVE_SERVICE_URL=http://live-service:8060
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      - SLACK_WEBHOOK_SECRET=${SLACK_WEBHOOK_SECRET:-}
     networks:
       - atlas-network
     depends_on:
@@ -184,6 +188,7 @@ services:
       - ai-service
       - security-service
       - employee-lifecycle-service
+      - live-service
 
   auth-service:
     build: ./services/auth-service
@@ -198,6 +203,10 @@ services:
       - NODE_ENV=${NODE_ENV:-development}
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - SCIM_API_KEY=${SCIM_API_KEY:-change-scim-api-key-in-production}
+      - SAML_IDP_SSO_URL=${SAML_IDP_SSO_URL:-https://idp.example.com/sso}
+      - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID:-https://idp.example.com/metadata}
+      - SAML_IDP_CERT=${SAML_IDP_CERT:-}
+      - OAUTH_ENCRYPTION_KEY=${OAUTH_ENCRYPTION_KEY:-}
     networks:
       - atlas-network
     depends_on:
@@ -213,7 +222,7 @@ services:
       - "127.0.0.1:8001:8001"
     environment:
       - MONGO_URL=mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-changeme_mongo_pass}@mongodb:27017/${MONGO_DB:-atlas_db}?authSource=admin
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
     networks:
       - atlas-network
@@ -232,6 +241,8 @@ services:
       - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:-atlas_password}
       - SPRING_RABBITMQ_HOST=rabbitmq
       - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=${RABBITMQ_USER:-atlas_rabbit}
+      - SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASS:-changeme_rabbit_pass}
     networks:
       - atlas-network
     depends_on:
@@ -265,7 +276,7 @@ services:
     ports:
       - "8004:8004"
     environment:
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
     networks:
       - atlas-network
@@ -412,6 +423,22 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     networks:
       - atlas-network
+
+  live-service:
+    build:
+      context: .
+      dockerfile: services/live-service/Dockerfile
+    container_name: atlas-live-service
+    ports:
+      - "8060:8060"
+    environment:
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+    networks:
+      - atlas-network
+    depends_on:
+      - rabbitmq
 
   frontend:
     build: ./frontend

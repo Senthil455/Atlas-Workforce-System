@@ -85,7 +85,7 @@ func initDatabase() {
 func initRabbitMQ() {
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
-		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
+		rabbitURL = "amqp://atlas_rabbit:changeme_rabbit_pass@rabbitmq:5672/"
 	}
 
 	conn, err := amqp.Dial(rabbitURL)
@@ -117,7 +117,7 @@ func initRabbitMQ() {
 func consumeEmployeeDeletions(ctx context.Context) {
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
-		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
+		rabbitURL = "amqp://atlas_rabbit:changeme_rabbit_pass@rabbitmq:5672/"
 	}
 
 	backoff := 1 * time.Second
