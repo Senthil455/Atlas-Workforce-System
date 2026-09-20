@@ -585,7 +585,7 @@ function isPublicOrAuthPath(path) {
   return PUBLIC_PREFIXES.some((p) => path === p || path.startsWith(p + '/'));
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   if (isPublicOrAuthPath(req.path)) {
     return next();
   }
@@ -636,10 +636,9 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ message: 'Authentication required' });
   }
 
+  let payload;
   try {
-    const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
-    req.user = payload;
-    next();
+    payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       console.error('JWT auth failure: token expired for', req.path);
@@ -656,6 +655,27 @@ function authMiddleware(req, res, next) {
     console.error('JWT auth failure: unknown error', err.message, 'for', req.path);
     return res.status(401).json({ message: 'Invalid or expired token' });
   }
+
+  // Check denylist for revoked sessions / logged-out tokens (added by auth-service on revoke/logout)
+  if (redisClient.isOpen && payload) {
+    try {
+      const checks = [];
+      if (payload.jti) checks.push(redisClient.get(`denylist:jti:${payload.jti}`).then(v => v ? 'jti' : null));
+      if (payload.sid) checks.push(redisClient.get(`denylist:sid:${payload.sid}`).then(v => v ? 'sid' : null));
+      if (checks.length) {
+        const results = await Promise.all(checks);
+        if (results.some(Boolean)) {
+          console.error('JWT auth failure: token denylisted for', req.path, payload.jti || payload.sid);
+          return res.status(401).json({ message: 'Session revoked' });
+        }
+      }
+    } catch (e) {
+      console.error('Denylist check failed, allowing request', e.message);
+    }
+  }
+
+  req.user = payload;
+  next();
 }
 
 app.use(authMiddleware);
