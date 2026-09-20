@@ -90,10 +90,10 @@
 
 ## Multi-Tenant SaaS Architecture
 
-- **Isolation mode:** Schema-per-tenant (PostgreSQL) + Collection-per-tenant (MongoDB)
+- **Isolation mode:** Single database with `tenant_id` column/field (PostgreSQL `tenant_id` column, MongoDB `tenant_id` field; see `services/*/main.py` and `MONGO_DB=atlas_db`). Schema-per-tenant and collection-per-tenant are roadmap items, not current.
 - **Tenant context:** Propagated via HTTP headers (X-Tenant-Id), JWT claims, and event metadata
 - **SCIM 2.0:** /scim/v2/Users, /scim/v2/Groups for automated provisioning
-- **Billing tiers:** Free, Pro, Enterprise — feature flags per tier
+- **Billing tiers:** Free, Pro, Enterprise — feature flags per tier (roadmap)
 
 ## Immutable Audit Log (Append-Only)
 
@@ -102,12 +102,11 @@
 - **Fields:** event_id, tenant_id, timestamp, actor_id, action, resource_type, resource_id, old_value, new_value, ip_address, user_agent, session_id, device_fingerprint, hash, previous_hash
 - **Retention:** 7 years for SOC2 / GDPR compliance
 
-## OpenTelemetry Observability
+## Observability (current and roadmap)
 
-- **Traces:** OTLP exporter → Jaeger + Tempo
-- **Metrics:** Prometheus exporter → Grafana dashboards
-- **Logs:** Structured JSON logging → Loki
-- **Service map:** Auto-discovered via trace propagation
+- **Metrics:** Prometheus exporter → Grafana dashboards (see `prometheus.yml`)
+- **Logs:** Structured JSON logging via `atlas_observability` (JSON logging, correlation IDs)
+- **Traces / OTel (roadmap):** `atlas_observability` currently exposes `AtlasTracingMiddleware` but no service registers it and there is no OTLP exporter, Jaeger/Tempo, Loki or auto-discovered service map yet. The OTLP → Jaeger/Tempo and Loki pipeline are planned, not current.
 
 ## RBAC Matrix (Enterprise)
 
