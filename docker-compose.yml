@@ -127,6 +127,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
       - atlas-network
@@ -145,6 +146,7 @@ services:
       - "8080:8080"
     environment:
       - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
+      - NODE_ENV=${NODE_ENV:-development}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
       - AUTH_SERVICE_URL=http://auth-service:8010
       - EMPLOYEE_SERVICE_URL=http://employee-service:8001
@@ -246,7 +248,11 @@ services:
       - "8003:8003"
     environment:
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
+      - POSTGRES_USER=${POSTGRES_USER:-atlas_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-atlas_password}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=${RABBITMQ_USER:-atlas_rabbit}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASS:-changeme_rabbit_pass}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
       - atlas-network

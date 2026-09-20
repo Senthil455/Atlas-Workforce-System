@@ -47,6 +47,8 @@ from schemas import (
 
 load_dotenv()
 
+logger = get_logger("security-service")
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 INTERNAL_API_KEY = os.environ["INTERNAL_API_KEY"]
 MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "100"))

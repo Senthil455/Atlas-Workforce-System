@@ -119,6 +119,11 @@ if (!SCIM_API_KEY) {
   process.exit(1);
 }
 
+if (NODE_ENV !== 'development' && (JWT_SECRET === 'change-me-to-a-long-random-string' || ADMIN_DEFAULT_PASSWORD === 'ChangeMe123!')) {
+  console.error('FATAL: refusing to start outside development with known default secrets (JWT_SECRET / ADMIN_DEFAULT_PASSWORD); set strong values via .env');
+  process.exit(1);
+}
+
 const jwtSecret = JWT_SECRET;
 
 if (!process.env.POSTGRES_URL) {

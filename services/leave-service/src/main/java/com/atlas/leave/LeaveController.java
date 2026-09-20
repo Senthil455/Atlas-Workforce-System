@@ -1,6 +1,7 @@
 package com.atlas.leave;
 
 import com.atlas.common.security.RequiresRole;
+import com.atlas.common.security.TenantId;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -25,14 +26,14 @@ public class LeaveController {
     @RequiresRole({"admin", "hr", "manager", "employee"})
     @GetMapping
     public ResponseEntity<List<LeaveRecord>> getAllLeaveRequests(
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         return ResponseEntity.ok(service.getAllLeaveRequests(tenantId));
     }
 
     @RequiresRole({"admin", "hr", "manager", "employee"})
     @GetMapping("/employee/{employeeId}")
     public ResponseEntity<List<LeaveRecord>> getLeaveByEmployee(
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId,
+            @TenantId String tenantId,
             @PathVariable String employeeId) {
         return ResponseEntity.ok(service.getLeaveByEmployeeId(tenantId, employeeId));
     }
@@ -41,7 +42,7 @@ public class LeaveController {
     @PostMapping("/request")
     public ResponseEntity<?> requestLeave(
             @RequestBody Map<String, String> request,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
         try {
             String employeeId = request.get("employeeId");
             LocalDate startDate = LocalDate.parse(request.get("startDate"));
@@ -63,7 +64,7 @@ public class LeaveController {
     public ResponseEntity<?> updateLeaveStatus(
             @PathVariable Long id,
             @RequestBody Map<String, String> request,
-            @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId) {
+            @TenantId String tenantId) {
 
         try {
             String status = request.get("status");
