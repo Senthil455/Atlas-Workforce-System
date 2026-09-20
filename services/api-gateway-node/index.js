@@ -56,6 +56,10 @@ async function checkCache(req, res, next) {
     return next();
   }
 
+  if (req.path.startsWith('/api/live')) {
+    return next();
+  }
+
   if (!redisClient.isOpen) {
     return next();
   }
@@ -134,6 +138,13 @@ if (NODE_ENV !== 'development' && (INTERNAL_JWT_SECRET === 'atlas-internal-jwt-s
 }
 
 const jwtSecret = JWT_SECRET;
+
+const MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || process.env.MFA_JWT_SECRET || JWT_SECRET;
+if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
+  console.warn('WARNING: MFA_STEPUP_SECRET is not set or equals JWT_SECRET; step-up tokens share session secret - set a dedicated secret for production');
+}
+const MFA_STEPUP_AUD = 'mfa-step-up';
+const MFA_STEPUP_ISS = 'atlas-auth';
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
   .split(',')
@@ -344,7 +355,7 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+<const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
 
 function isWsPath(pathname) {
   if (ALLOWED_WS_PATHS.has(pathname)) return true;
@@ -421,7 +432,7 @@ function auditProxyMiddleware(req, res, next) {
 
 const SENSITIVE_ROUTES = ['/api/payroll', '/api/compliance', '/api/audit'];
 
-function mfaStepUpMiddleware(req, res, next) {
+async function mfaStepUpMiddleware(req, res, next) {
   if (req.method === 'GET') {
     return next();
   }
@@ -435,24 +446,109 @@ function mfaStepUpMiddleware(req, res, next) {
   }
 
   const mfaToken = req.headers['x-mfa-token'];
-  if (mfaToken) {
-    try {
-      const payload = jwt.verify(mfaToken, jwtSecret, { algorithms: ['HS256'] });
-      if (payload.mfa_validated && payload.purpose === 'mfa_step_up') {
-        req.headers['x-mfa-validated'] = 'true';
-        return next();
-      }
-    } catch {
-      // Token invalid, fall through to MFA required
-    }
+  if (!mfaToken) {
+    return res.status(403).json({
+      message: 'MFA validation required for this resource',
+      mfa_required: true,
+      mfa_challenge_url: '/api/auth/mfa/challenge',
+      detail: 'Please validate your identity with MFA before accessing sensitive resources'
+    });
   }
 
-  return res.status(403).json({
-    message: 'MFA validation required for this resource',
-    mfa_required: true,
-    mfa_challenge_url: '/api/auth/mfa/challenge',
-    detail: 'Please validate your identity with MFA before accessing sensitive resources'
-  });
+  try {
+    const payload = jwt.verify(mfaToken, MFA_STEPUP_SECRET, {
+      algorithms: ['HS256'],
+      audience: MFA_STEPUP_AUD,
+      issuer: MFA_STEPUP_ISS,
+    });
+
+    if (!payload.mfa_validated || payload.purpose !== 'mfa_step_up') {
+      return res.status(403).json({
+        message: 'Invalid MFA token',
+        mfa_required: true,
+        detail: 'Step-up token missing required claims'
+      });
+    }
+
+    const tokenUserId = String(payload.sub || payload.user_id || payload.id || '');
+    const tokenTenantId = String(payload.tenant_id || payload.tenantId || 'default');
+    const authedUserId = String(req.user?.id || '');
+    const authedTenantId = String(req.user?.tenant_id || 'default');
+
+    if (!authedUserId) {
+      return res.status(401).json({ message: 'Authentication required' });
+    }
+
+    if (!tokenUserId || tokenUserId !== authedUserId) {
+      return res.status(403).json({
+        message: 'MFA token does not belong to authenticated user',
+        mfa_required: true,
+        detail: 'Step-up token subject mismatch'
+      });
+    }
+
+    if (tokenTenantId !== authedTenantId) {
+      return res.status(403).json({
+        message: 'MFA token tenant mismatch',
+        mfa_required: true,
+        detail: 'Step-up token tenant mismatch'
+      });
+    }
+
+    const jti = payload.jti;
+    if (!jti) {
+      return res.status(403).json({
+        message: 'MFA token missing jti',
+        mfa_required: true,
+        detail: 'Step-up token is not single-use'
+      });
+    }
+
+    if (redisClient.isOpen) {
+      const jtiKey = `mfa_jti:${jti}`;
+      const exists = await redisClient.get(jtiKey);
+      if (exists) {
+        return res.status(403).json({
+          message: 'MFA token already used',
+          mfa_required: true,
+          detail: 'Step-up token has been replayed'
+        });
+      }
+      const expMs = payload.exp ? payload.exp * 1000 : Date.now() + 5 * 60 * 1000;
+      const ttlSec = Math.max(1, Math.ceil((expMs - Date.now()) / 1000));
+      try {
+        await redisClient.set(jtiKey, '1', { EX: ttlSec, NX: true });
+      } catch (e) {
+        console.error('MFA jti store failed', e.message);
+      }
+    } else {
+      console.warn('MFA jti replay check skipped - Redis not connected');
+    }
+
+    req.headers['x-mfa-validated'] = 'true';
+    return next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(403).json({
+        message: 'MFA token expired',
+        mfa_required: true,
+        detail: 'Step-up token expired, re-authenticate with MFA'
+      });
+    }
+    if (err.name === 'JsonWebTokenError' || err.name === 'NotBeforeError') {
+      return res.status(403).json({
+        message: 'Invalid MFA token',
+        mfa_required: true,
+        detail: err.message
+      });
+    }
+    console.error('MFA token verification failed', err.message);
+    return res.status(403).json({
+      message: 'MFA validation failed',
+      mfa_required: true,
+      detail: err.message
+    });
+  }
 }
 
 const PUBLIC_PREFIXES = [
@@ -515,13 +611,21 @@ function authMiddleware(req, res, next) {
     return next();
   }
 
+  let token = null;
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
+  if (authHeader?.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  } else if (req.path.startsWith('/api/live')) {
+    try {
+      const url = new URL(req.originalUrl || req.url, 'http://localhost');
+      token = url.searchParams.get('token');
+    } catch {}
+  }
+  if (!token) {
     return res.status(401).json({ message: 'Authentication required' });
   }
 
   try {
-    const token = authHeader.slice(7);
     const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
     req.user = payload;
     next();
@@ -842,11 +946,11 @@ app.use('/api/integration', proxyService(services.integration, '/api/integration
 app.use('/api/lifecycle', proxyService(services.lifecycle, '/api/lifecycle', { '^/api/lifecycle': '/api/v1/lifecycle' }));
 app.use('/api/security', proxyService(services.security, '/api/security', { '^/api/security': '/api/v1/security' }));
 app.use('/api/ai', proxyService(services.ai, '/api/ai', { '^/api/ai': '/api/v1/ai' }));
+app.use('/api/live', proxyService(services.live, '/api/live', { '^/api/live': '/api/v1/live' }));
 
 app.use('/api/command-center', proxyService(services.analytics, '/api/command-center', { '^/api/command-center': '/api/v1/command-center' }));
 app.use('/api/workforce', proxyService(services.workforce, '/api/workforce', { '^/api/workforce': '/api/v1/workforce' }));
 app.use('/api/learning', proxyService(services.lms, '/api/learning', { '^/api/learning': '/api/v1/learning' }));
-app.use('/api/live', proxyService(services.live, '/api/live', { '^/api/live': '/api/v1/live' }));
 
 async function enqueueAuditRetry(payload) {
   if (!redisClient.isOpen) return;

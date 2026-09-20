@@ -3,7 +3,8 @@
 #   JWT_SECRET, INTERNAL_JWT_SECRET, POSTGRES_PASSWORD, MONGO_PASSWORD,
 #   MONGO_USER, REDIS_PASSWORD, RABBITMQ_USER, RABBITMQ_PASS,
 #   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY,
-#   OAUTH_ENCRYPTION_KEY.
+#   OAUTH_ENCRYPTION_KEY,
+#   MFA_STEPUP_SECRET.
 # Generate strong secrets: openssl rand -base64 64
 services:
   postgres:
@@ -147,6 +148,7 @@ services:
       - "8080:8080"
     environment:
       - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
+      - MFA_STEPUP_SECRET=${MFA_STEPUP_SECRET:-atlas-mfa-stepup-secret-change-me}
       - NODE_ENV=${NODE_ENV:-development}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
       - AUTH_SERVICE_URL=http://auth-service:8010
@@ -199,6 +201,7 @@ services:
       - "8010:8010"
     environment:
       - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
+      - MFA_STEPUP_SECRET=${MFA_STEPUP_SECRET:-atlas-mfa-stepup-secret-change-me}
       - ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD:-ChangeMe123!}
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
@@ -221,10 +224,11 @@ services:
       dockerfile: services/employee-python-service/Dockerfile
     container_name: atlas-employee-service
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     environment:
       - MONGO_URL=mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-changeme_mongo_pass}@mongodb:27017/${MONGO_DB:-atlas_db}?authSource=admin
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
     networks:
       - atlas-network
     depends_on:
@@ -433,8 +437,8 @@ services:
     ports:
       - "8060:8060"
     environment:
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
       - PORT=8060
     networks:
