@@ -201,6 +201,9 @@ services:
       - NODE_ENV=${NODE_ENV:-development}
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - SCIM_API_KEY=${SCIM_API_KEY:-change-scim-api-key-in-production}
+      - SAML_IDP_SSO_URL=${SAML_IDP_SSO_URL:-https://idp.example.com/sso}
+      - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID:-https://idp.example.com/metadata}
+      - SAML_IDP_CERT=${SAML_IDP_CERT:-}
       - OAUTH_ENCRYPTION_KEY=${OAUTH_ENCRYPTION_KEY:-}
     networks:
       - atlas-network
