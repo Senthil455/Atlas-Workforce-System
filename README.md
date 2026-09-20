@@ -8,9 +8,9 @@ A production‑grade, polyglot microservices platform for **workforce management
 
 Atlas is a full‑stack HRMS platform built with **4 backend runtimes** (Node.js, Python, Java, Go) and a modern Next.js frontend. Each domain workload routes to its optimal runtime—Go for high‑concurrency WebSocket broadcasting, Python for AI‑powered analytics, Java for transactional payroll, and Node.js for API orchestration. All services are secured with **zero-trust authentication**, **event-driven messaging** via RabbitMQ, and monitored through a shared **observability library**.
 
-> **Status:** ✅ All services passing — TypeScript 0 errors, Python 11/11 services syntactically valid, Go 4/4 services building, employee tests 6/6 passing.
+> **Status:** See the latest CI runs on GitHub Actions for current build and test results — TypeScript type-check, Python syntax and service tests, Go vet/build, and Docker builds (see `.github/workflows/ci.yml`).
 
-**Live demo:** `http://localhost:3000` — Login: `admin@atlas.io` / `ChangeMe123!`
+**Live demo:** `http://localhost:3000` — create an account via `POST /register` or use the seeded admin (set `ADMIN_DEFAULT_PASSWORD` in your `.env` — see `.env.example` and `services/auth-service/.env.example`; do not use the default in production).
 
 ---
 
@@ -75,9 +75,9 @@ Atlas is a full‑stack HRMS platform built with **4 backend runtimes** (Node.js
 - **Smart Filters + Saved Views** — Inline editing and workspace persistence
 
 ### Infrastructure
-- **Docker / docker compose** — Local orchestration (18 containers)
+- **Docker / docker compose** — Local orchestration (see `docker-compose.yml` for the full service list; count varies as services are added)
 - **RabbitMQ** — Event‑driven messaging (5 exchanges: notifications, audit, live, employee, payroll)
-- **Prometheus + Grafana** — Monitoring stack with 14 scrape targets
+- **Prometheus + Grafana** — Monitoring stack (see `prometheus.yml` for scrape targets and `docker-compose.monitoring.yml` for Grafana)
 - **Kubernetes** — Production manifests (k8s/)
 - **Observability Library** — Shared `atlas_observability` Python package (editable install)
 
@@ -352,12 +352,12 @@ docker compose -f docker-compose.monitoring.yml up -d
 | ATS | `http://localhost:8012/docs` |
 | AI Copilot | `http://localhost:8015/docs` |
 | RabbitMQ UI | `http://localhost:15672` (guest/guest) |
-| Grafana | `http://localhost:3001` (admin/admin) |
+| Grafana | `http://localhost:3001` (user `admin`, password from `GRAFANA_ADMIN_PASSWORD` in `.env` — see `docker-compose.monitoring.yml`) |
 | Prometheus | `http://localhost:9090` |
 
 ### Default Credentials
 
-- **Admin:** `admin@atlas.io` / `ChangeMe123!`
+- **Admin:** `admin@atlas.io` — password is the value of `ADMIN_DEFAULT_PASSWORD` in your `.env` (see `.env.example`). Do not use a default password in production.
 
 ---
 
@@ -400,11 +400,11 @@ Atlas-Workforce-System/
 │   └── integration/                     # End-to-end workflow tests
 ├── docs/                                # Architecture docs
 ├── k8s/                                 # Kubernetes manifests (14 services)
-├── .github/workflows/                   # CI pipeline (5 matrix jobs)
-├── docker-compose.yml                   # Main orchestration (18 containers)
+├── .github/workflows/                   # CI pipeline (see `ci.yml` for current matrix)
+├── docker-compose.yml                   # Main orchestration (see file for service count)
 ├── docker-compose.monitoring.yml        # Prometheus + Grafana
 ├── Makefile                             # Dev CLI commands
-└── prometheus.yml                       # Metrics config (14 targets)
+└── prometheus.yml                       # Metrics config (see file for scrape targets)
 ```
 
 ### Available Commands
@@ -455,23 +455,17 @@ make test
 
 ### QA Status
 
-The system has undergone a comprehensive **121-test-case QA audit** covering all 11 service domains. All issues have been fixed and verified:
+For current test results see the latest CI runs: `.github/workflows/ci.yml` (frontend type-check, Python syntax and service tests, Go vet/build, Docker builds, and the `ci-coverage-check` gate). Counts in this section are intentionally not hard-coded here — check the Actions tab for the authoritative numbers.
 
-| Category | Tests | Status |
-|----------|:-----:|:------:|
-| Unit Tests (Node/Python/Java/Go) | 16 | ✅ All passing |
-| API Integration | 6 | ✅ All verified |
-| Real-Time (WebSocket/SSE) | 5 | ✅ All mitigated |
-| Chaos/Failure | 4 | ✅ All hardened |
-| Security (OWASP Top 10) | 12 | ✅ All protected |
-| Concurrency | 5 | ✅ All resolved |
-| Data Consistency | 5 | ✅ All verified |
-| UI/UX | 5 | ✅ All fixed |
-| Performance | 4 | ✅ All optimized |
-| Observability | 5 | ✅ All instrumented |
-| End-to-End Critical Flows | 4 | ✅ All validated |
+### Known gaps (tracked as issues)
 
-TypeScript: **0 errors** · Python: **11/11 services syntax-valid** · Go: **4/4 services building**
+The following areas are known to be incomplete and are tracked as open issues — see the Issues tab for details. They are not asserted as fixed:
+
+- CI coverage for some Go/Python/Java services and Docker images (see CI matrix issue)
+- E2E (Playwright) and k6 performance suites not yet run on every PR (see Playwright/k6 issue)
+- Integration tests in `tests/integration` not yet wired into CI
+- A few services still have skipped or placeholder tests
+- Observability tracing (OTel) and schema-per-tenant are roadmap items, not current state (see docs/enterprise-architecture.md)
 
 ---
 
@@ -481,10 +475,10 @@ TypeScript: **0 errors** · Python: **11/11 services syntax-valid** · Go: **4/4
 docker compose -f docker-compose.monitoring.yml up -d
 ```
 
-All 14 application services expose Prometheus metrics at `/metrics` endpoints. Each request is logged with structured JSON (correlation ID, trace ID, duration, status).
+Most application services expose Prometheus metrics — see `prometheus.yml` for the full list of scrape targets (Go/Python services use `/metrics`, Java payroll and leave use `/actuator/prometheus`). Each request is logged with structured JSON (correlation ID, trace ID, duration, status).
 
 - **Prometheus** — `http://localhost:9090`
-- **Grafana** — `http://localhost:3001` (admin/admin)
+- **Grafana** — `http://localhost:3001` (user `admin`, password from `GRAFANA_ADMIN_PASSWORD` in `.env`)
 
 ## Author
 
