@@ -1473,70 +1473,108 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       return res.status(400).json({ message: 'SAMLResponse is required' });
     }
 
-    const decodedXml = Buffer.from(SAMLResponse, 'base64').toString('utf-8');
-
-    if (!SAML_IDP_CERT && NODE_ENV === 'production') {
-      console.warn('SAML_IDP_CERT not configured — signature verification disabled');
+    if (!SAML_IDP_CERT || !SAML_IDP_CERT.trim()) {
+      console.error('SAML_IDP_CERT not configured — rejecting SAML ACS request');
+      return res.status(503).json({ message: 'SAML is not configured on this server. Set SAML_IDP_CERT to enable SAML authentication.' });
     }
+
+    const decodedXml = Buffer.from(SAMLResponse, 'base64').toString('utf-8');
 
     const doc = new DOMParser().parseFromString(decodedXml, 'text/xml');
 
-    if (SAML_IDP_CERT) {
-      const signatureNodes = doc.getElementsByTagNameNS
-        ? doc.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'Signature')
-        : doc.getElementsByTagName('Signature');
+    const signatureNodes = doc.getElementsByTagNameNS
+      ? doc.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'Signature')
+      : doc.getElementsByTagName('Signature');
 
-      if (signatureNodes.length === 0) {
-        return res.status(400).json({ message: 'SAML response is not signed' });
+    if (signatureNodes.length === 0) {
+      return res.status(400).json({ message: 'SAML response is not signed' });
+    }
+
+    let signatureVerified = false;
+    for (let i = 0; i < signatureNodes.length; i++) {
+      const sig = new SignedXml();
+      sig.keyInfoProvider = {
+        getKeyInfo() { return '<X509Data></X509Data>'; },
+        getKey(keyInfo) { return SAML_IDP_CERT; },
+      };
+      sig.loadSignature(signatureNodes[i].toString());
+      try {
+        signatureVerified = sig.checkSignature(decodedXml);
+        if (signatureVerified) break;
+      } catch {
+        continue;
+      }
+    }
+
+    if (!signatureVerified) {
+      return res.status(401).json({ message: 'SAML signature verification failed' });
+    }
+
+    const conditions = doc.getElementsByTagNameNS
+      ? doc.getElementsByTagNameNS('urn:oasis:names:tc:SAML:2.0:assertion', 'Conditions')
+      : doc.getElementsByTagName('Conditions');
+
+    if (conditions.length > 0) {
+      const condition = conditions[0];
+      const notBefore = condition.getAttribute('NotBefore');
+      const notOnOrAfter = condition.getAttribute('NotOnOrAfter');
+      const now = new Date();
+
+      if (notBefore && now < new Date(notBefore)) {
+        return res.status(401).json({ message: 'SAML assertion is not yet valid (NotBefore)' });
       }
 
-      let signatureVerified = false;
-      for (let i = 0; i < signatureNodes.length; i++) {
-        const sig = new SignedXml();
-        sig.keyInfoProvider = {
-          getKeyInfo() { return '<X509Data></X509Data>'; },
-          getKey(keyInfo) { return SAML_IDP_CERT; },
-        };
-        sig.loadSignature(signatureNodes[i].toString());
-        try {
-          signatureVerified = sig.checkSignature(decodedXml);
-          if (signatureVerified) break;
-        } catch {
-          continue;
-        }
+      if (notOnOrAfter && now >= new Date(notOnOrAfter)) {
+        return res.status(401).json({ message: 'SAML assertion has expired (NotOnOrAfter)' });
       }
 
-      if (!signatureVerified) {
-        return res.status(401).json({ message: 'SAML signature verification failed' });
-      }
+      const audienceNodes = doc.getElementsByTagNameNS
+        ? doc.getElementsByTagNameNS('urn:oasis:names:tc:SAML:2.0:assertion', 'Audience')
+        : doc.getElementsByTagName('Audience');
 
-      const conditions = doc.getElementsByTagNameNS
-        ? doc.getElementsByTagNameNS('urn:oasis:names:tc:SAML:2.0:assertion', 'Conditions')
-        : doc.getElementsByTagName('Conditions');
-
-      if (conditions.length > 0) {
-        const condition = conditions[0];
-        const notBefore = condition.getAttribute('NotBefore');
-        const notOnOrAfter = condition.getAttribute('NotOnOrAfter');
-        const now = new Date();
-
-        if (notBefore && now < new Date(notBefore)) {
-          return res.status(401).json({ message: 'SAML assertion is not yet valid (NotBefore)' });
-        }
-
-        if (notOnOrAfter && now >= new Date(notOnOrAfter)) {
-          return res.status(401).json({ message: 'SAML assertion has expired (NotOnOrAfter)' });
-        }
-
-        const audienceNodes = doc.getElementsByTagNameNS
-          ? doc.getElementsByTagNameNS('urn:oasis:names:tc:SAML:2.0:assertion', 'Audience')
-          : doc.getElementsByTagName('Audience');
-
+      if (audienceNodes.length > 0) {
+        let audienceValid = false;
+        const expectedSpEntityId = `${req.protocol}://${req.get('host')}/saml/metadata`;
         for (let i = 0; i < audienceNodes.length; i++) {
-          if (audienceNodes[i].textContent === SAML_IDP_ENTITY_ID) {
+          const aud = (audienceNodes[i].textContent || '').trim();
+          if (aud === SAML_IDP_ENTITY_ID || aud === expectedSpEntityId) {
+            audienceValid = true;
             break;
           }
         }
+        if (!audienceValid) {
+          return res.status(401).json({ message: 'SAML audience restriction mismatch' });
+        }
+      }
+    }
+
+    // Validate Recipient and SubjectConfirmation expiry outside Conditions so it
+    // applies even when Conditions is absent. SAML spec requires Recipient to
+    // match the ACS URL.
+    const subjectConfNodes = doc.getElementsByTagNameNS
+      ? doc.getElementsByTagNameNS('urn:oasis:names:tc:SAML:2.0:assertion', 'SubjectConfirmationData')
+      : doc.getElementsByTagName('SubjectConfirmationData');
+    if (subjectConfNodes.length > 0) {
+      const expectedRecipient = `${req.protocol}://${req.get('host')}/saml/acs`;
+      const now = new Date();
+      for (let i = 0; i < subjectConfNodes.length; i++) {
+        const recipient = subjectConfNodes[i].getAttribute('Recipient');
+        if (recipient && recipient !== expectedRecipient) {
+          return res.status(401).json({ message: 'SAML Recipient mismatch' });
+        }
+        const scNotOnOrAfter = subjectConfNodes[i].getAttribute('NotOnOrAfter');
+        if (scNotOnOrAfter && now >= new Date(scNotOnOrAfter)) {
+          return res.status(401).json({ message: 'SAML SubjectConfirmation has expired' });
+        }
+      }
+    }
+
+    // Validate Response Destination if present
+    const destination = doc.documentElement.getAttribute('Destination');
+    if (destination) {
+      const expectedDestination = `${req.protocol}://${req.get('host')}/saml/acs`;
+      if (destination !== expectedDestination) {
+        return res.status(401).json({ message: 'SAML Destination mismatch' });
       }
     }
 
