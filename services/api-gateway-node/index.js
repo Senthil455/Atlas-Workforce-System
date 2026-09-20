@@ -56,6 +56,10 @@ async function checkCache(req, res, next) {
     return next();
   }
 
+  if (req.path.startsWith('/api/live')) {
+    return next();
+  }
+
   if (!redisClient.isOpen) {
     return next();
   }
@@ -251,6 +255,7 @@ const services = {
   security:
     process.env.SECURITY_SERVICE_URL || 'http://security-service:8050',
   ai: process.env.AI_SERVICE_URL || 'http://ai-service:8065',
+  live: process.env.LIVE_SERVICE_URL || 'http://live-service:8060',
 };
 
 async function resolveServiceHostnames() {
@@ -341,7 +346,7 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws', '/api/live/ws']);
 const PUBLIC_AUTH_PATHS = ['/api/auth/login', '/api/auth/register'];
 
 function isPublicPath(path) {
@@ -492,6 +497,7 @@ function authMiddleware(req, res, next) {
     '/api/security',
     '/api/ai',
     '/api/billing',
+    '/api/live',
   ];
 
   const needsAuth = protectedPrefixes.some(
@@ -502,13 +508,21 @@ function authMiddleware(req, res, next) {
     return next();
   }
 
+  let token = null;
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
+  if (authHeader?.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  } else if (req.path.startsWith('/api/live')) {
+    try {
+      const url = new URL(req.originalUrl || req.url, 'http://localhost');
+      token = url.searchParams.get('token');
+    } catch {}
+  }
+  if (!token) {
     return res.status(401).json({ message: 'Authentication required' });
   }
 
   try {
-    const token = authHeader.slice(7);
     const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
     req.user = payload;
     next();
@@ -821,6 +835,7 @@ app.use('/api/integration', proxyService(services.integration, '/api/integration
 app.use('/api/lifecycle', proxyService(services.lifecycle, '/api/lifecycle', { '^/api/lifecycle': '/api/v1/lifecycle' }));
 app.use('/api/security', proxyService(services.security, '/api/security', { '^/api/security': '/api/v1/security' }));
 app.use('/api/ai', proxyService(services.ai, '/api/ai', { '^/api/ai': '/api/v1/ai' }));
+app.use('/api/live', proxyService(services.live, '/api/live', { '^/api/live': '/api/v1/live' }));
 
 async function enqueueAuditRetry(payload) {
   if (!redisClient.isOpen) return;
@@ -855,7 +870,9 @@ const server = app.listen(PORT, () => {
 server.on('upgrade', (req, socket, head) => {
   const parsedUrl = new URL(req.url, 'http://localhost');
   const pathname = parsedUrl.pathname;
-  const isWs = ALLOWED_WS_PATHS.has(pathname);
+  const isNotificationWs = pathname === '/ws' || pathname === '/notification/ws';
+  const isLiveWs = pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/');
+  const isWs = ALLOWED_WS_PATHS.has(pathname) || isLiveWs || isNotificationWs;
   if (isWs) {
     const token = parsedUrl.searchParams.get('token');
     if (!token) {
@@ -879,9 +896,17 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
 
-    const target = new URL(services.notification);
-    target.pathname = '/ws';
-    target.search = parsedUrl.search;
+    let target;
+    if (isLiveWs) {
+      target = new URL(services.live);
+      const livePath = pathname.replace(/^\/api\/live\/ws/, '/api/v1/live/ws');
+      target.pathname = livePath;
+      target.search = parsedUrl.search;
+    } else {
+      target = new URL(services.notification);
+      target.pathname = '/ws';
+      target.search = parsedUrl.search;
+    }
     const proxyReq = http.request(target.toString(), { method: 'GET', headers: req.headers });
     proxyReq.on('upgrade', (proxyRes, proxySocket) => {
       socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
