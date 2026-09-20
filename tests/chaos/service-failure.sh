@@ -152,7 +152,7 @@ HTTP_CODE=$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKE
 if [ "$HTTP_CODE" = "503" ] || [ "$HTTP_CODE" = "502" ] || [ "$HTTP_CODE" = "000" ]; then
   log_ok "Gateway returned $HTTP_CODE for failed service (expected 503/502)"
 else
-  log_warn "Gateway returned $HTTP_CODE (expected 503/502)"
+  log_fail "Gateway returned $HTTP_CODE (expected 503/502) - resilience not observed"
 fi
 
 # 5. Verify other services remain available
