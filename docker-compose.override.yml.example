@@ -1,0 +1,23 @@
+# Development override for Atlas Workforce System
+# Copy this file to docker-compose.override.yml for local development:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# This file is NOT committed as docker-compose.override.yml on purpose.
+# The main docker-compose.yml defaults NODE_ENV to production so that
+# `docker compose up` with zero .env does NOT run with forgeable default
+# secrets (see issue #201). Development-specific relaxations belong here,
+# where a developer has explicitly opted into development mode.
+#
+# IMPORTANT: Even in development, services now refuse known default secrets
+# (JWT_SECRET=change-me..., INTERNAL_JWT_SECRET=atlas-internal...,
+# ADMIN_DEFAULT_PASSWORD=ChangeMe123!) in every mode. You must set strong
+# secrets in your .env when using this override.
+
+services:
+  api-gateway:
+    environment:
+      - NODE_ENV=development
+
+  auth-service:
+    environment:
+      - NODE_ENV=development
