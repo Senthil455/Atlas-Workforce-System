@@ -126,6 +126,13 @@ if (NODE_ENV !== 'development' && (JWT_SECRET === 'change-me-to-a-long-random-st
 
 const jwtSecret = JWT_SECRET;
 
+const MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || process.env.MFA_JWT_SECRET || JWT_SECRET;
+if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
+  console.warn('WARNING: MFA_STEPUP_SECRET is not set or equals JWT_SECRET; step-up tokens share session secret - set a dedicated secret for production');
+}
+const MFA_STEPUP_AUD = 'mfa-step-up';
+const MFA_STEPUP_ISS = 'atlas-auth';
+
 // OAuth at-rest encryption for sensitive provider secrets and tokens.
 // Uses OAUTH_ENCRYPTION_KEY when set, otherwise derives a 32-byte key
 // from JWT_SECRET so existing deployments still get encryption at rest
@@ -294,10 +301,23 @@ function signAccessToken(user) {
   );
 }
 
-function signMfaToken(userId) {
+function signMfaToken(user) {
+  const userId = typeof user === 'object' ? (user.id ?? user.user_id ?? user.sub) : user;
+  const tenantId = typeof user === 'object' ? (user.tenant_id ?? user.tenantId ?? 'default') : 'default';
+  const jti = uuidv4();
   return jwt.sign(
-    { id: userId, mfa_validated: true, purpose: 'mfa_step_up' },
-    jwtSecret,
+    {
+      sub: String(userId),
+      user_id: String(userId),
+      id: String(userId),
+      tenant_id: String(tenantId),
+      mfa_validated: true,
+      purpose: 'mfa_step_up',
+      aud: MFA_STEPUP_AUD,
+      iss: MFA_STEPUP_ISS,
+      jti,
+    },
+    MFA_STEPUP_SECRET,
     { algorithm: 'HS256', expiresIn: '5m' }
   );
 }
@@ -1109,7 +1129,7 @@ app.post('/mfa/validate', requireRole(), createUserRateLimiter('mfa_validate', 1
     if (token) {
       const isValid = authenticator.check(token, mfa.mfa_secret);
       if (isValid) {
-        const mfaToken = signMfaToken(userId);
+        const mfaToken = signMfaToken(req.user);
         await sendAuditEvent('auth.mfa_validate', userId, req.user.email, { method: 'totp' });
         return res.json({ message: 'Token validated', validated: true, mfa_token: mfaToken });
       }
@@ -1122,7 +1142,7 @@ app.post('/mfa/validate', requireRole(), createUserRateLimiter('mfa_validate', 1
         if (idx !== -1) {
           codes.splice(idx, 1);
           await pool.query('UPDATE user_mfa SET backup_codes = $1::jsonb WHERE user_id = $2', [JSON.stringify(codes), userId]);
-          const mfaToken = signMfaToken(userId);
+          const mfaToken = signMfaToken(req.user);
           await sendAuditEvent('auth.mfa_validate', userId, req.user.email, { method: 'backup_code' });
           return res.json({ message: 'Backup code accepted', validated: true, mfa_token: mfaToken });
         }
