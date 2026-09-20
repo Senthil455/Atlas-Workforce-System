@@ -355,7 +355,7 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-<const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
 
 function isWsPath(pathname) {
   if (ALLOWED_WS_PATHS.has(pathname)) return true;
@@ -901,6 +901,12 @@ function proxyService(target, prefix, pathRewrite) {
       proxyReq(proxyReq, req) {
         const correlationId = req.headers['x-correlation-id'] || crypto.randomUUID();
         proxyReq.setHeader('x-correlation-id', correlationId);
+        // Overwrite tenant header with verified claim so downstream cannot be spoofed
+        const tenantId = req.headers['x-tenant-id'] || req.headers['X-Tenant-Id'] || req.user?.tenant_id;
+        if (tenantId) {
+          proxyReq.setHeader('x-tenant-id', tenantId);
+          proxyReq.setHeader('X-Tenant-Id', tenantId);
+        }
       }
     }
   });
@@ -915,6 +921,10 @@ function proxyService(target, prefix, pathRewrite) {
       };
       const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET, { algorithm: 'HS256' });
       req.headers['x-internal-auth'] = internalToken;
+      // Overwrite client-supplied tenant header with verified claim
+      const tenantId = req.user.tenant_id || 'default';
+      req.headers['x-tenant-id'] = tenantId;
+      req.headers['X-Tenant-Id'] = tenantId;
     }
     req.url = prefix + req.url;
     checkCache(req, res, (err) => {
