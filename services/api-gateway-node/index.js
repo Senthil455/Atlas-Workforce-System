@@ -649,6 +649,11 @@ async function authMiddleware(req, res, next) {
   let payload;
   try {
     payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+    // Challenge tokens are only for /mfa/validate - never for protected routes
+    if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
+      console.error('JWT auth failure: challenge token rejected for', req.path);
+      return res.status(401).json({ message: 'MFA challenge token not valid for this endpoint' });
+    }
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       console.error('JWT auth failure: token expired for', req.path);
@@ -1182,6 +1187,11 @@ server.on('upgrade', (req, socket, head) => {
     }
     try {
       const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+      if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       const internalPayload = {
         user_id: payload.id || payload.sub,
         user_role: payload.role || 'employee',
