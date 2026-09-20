@@ -2,7 +2,8 @@
 # Before deploying to production, set ALL of the following environment variables:
 #   JWT_SECRET, INTERNAL_JWT_SECRET, POSTGRES_PASSWORD, MONGO_PASSWORD,
 #   MONGO_USER, REDIS_PASSWORD, RABBITMQ_USER, RABBITMQ_PASS,
-#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY.
+#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY,
+#   OAUTH_ENCRYPTION_KEY.
 # Generate strong secrets: openssl rand -base64 64
 services:
   postgres:
@@ -198,6 +199,7 @@ services:
       - NODE_ENV=${NODE_ENV:-development}
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - SCIM_API_KEY=${SCIM_API_KEY:-change-scim-api-key-in-production}
+      - OAUTH_ENCRYPTION_KEY=${OAUTH_ENCRYPTION_KEY:-}
     networks:
       - atlas-network
     depends_on:
