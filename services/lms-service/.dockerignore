@@ -1,0 +1,10 @@
+Dockerfile
+.dockerignore
+.git
+.github
+README.md
+*.exe
+*.log
+*.tsbuildinfo
+.next/
+node_modules/

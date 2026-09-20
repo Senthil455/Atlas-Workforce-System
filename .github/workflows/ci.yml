@@ -249,6 +249,29 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  guard-against-binaries:
+    name: Guard Against Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for tracked binaries and logs
+        run: |
+          echo "Checking for tracked .exe, .log, tsbuildinfo files..."
+          if git ls-files | grep -E '\.exe$|\.log$|tsbuildinfo'; then
+            echo "ERROR: Tracked binaries/logs found. Run: git rm --cached <file> and ensure .gitignore covers it."
+            exit 1
+          fi
+          echo "Checking for large files >1MB..."
+          # Find files >1MB not in .git or node_modules
+          large=$(find . -type f -not -path "./.git/*" -not -path "*/node_modules/*" -not -path "./.next/*" -size +1M 2>/dev/null | head -n 20)
+          if [ -n "$large" ]; then
+            echo "ERROR: Large files found (>1MB):"
+            echo "$large"
+            echo "Please remove them and add to .gitignore"
+            exit 1
+          fi
+          echo "No tracked binaries/logs or large files found."
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
