@@ -355,7 +355,7 @@ let hostnameCache = new Map();
 
 startupHealthCheck();
 
-<const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
+const ALLOWED_WS_PATHS = new Set(['/ws', '/notification/ws']);
 
 function isWsPath(pathname) {
   if (ALLOWED_WS_PATHS.has(pathname)) return true;
@@ -930,14 +930,14 @@ app.use('/saml', proxyService(services.auth, '/saml', { '^/saml': '' }));
 
 app.use('/api/employee', proxyService(services.employee, '/api/employee', { '^/api/employee': '' }));
 app.use('/api/analytics', proxyService(services.analytics, '/api/analytics', { '^/api/analytics': '/analytics' }));
-app.use('/api/attendance', proxyService(services.attendance, '/api/attendance', { '^/api/attendance': '' }));
-app.use('/api/leave', proxyService(services.leave, '/api/leave', { '^/api/leave': '' }));
-app.use('/api/payroll', proxyService(services.payroll, '/api/payroll', { '^/api/payroll': '' }));
+app.use('/api/attendance', proxyService(services.attendance, '/api/attendance', { '^/api/attendance': '/api/attendance' }));
+app.use('/api/leave', proxyService(services.leave, '/api/leave', { '^/api/leave': '/api/leave' }));
+app.use('/api/payroll', proxyService(services.payroll, '/api/payroll', { '^/api/payroll': '/api/payroll' }));
 app.use('/api/notification', proxyService(services.notification, '/api/notification', { '^/api/notification': '' }));
 
-app.use('/api/ats', proxyService(services.ats, '/api/ats', { '^/api/ats': '' }));
-app.use('/api/lms', proxyService(services.lms, '/api/lms', { '^/api/lms': '' }));
-app.use('/api/performance', proxyService(services.performance, '/api/performance', { '^/api/performance': '' }));
+app.use('/api/ats', proxyService(services.ats, '/api/ats', { '^/api/ats': '/api/v1' }));
+app.use('/api/lms', proxyService(services.lms, '/api/lms', { '^/api/lms': '/api/v1' }));
+app.use('/api/performance', proxyService(services.performance, '/api/performance', { '^/api/performance': '/api/v1' }));
 app.use('/api/copilot', proxyService(services.copilot, '/api/copilot', { '^/api/copilot': '' }));
 app.use('/api/audit', proxyService(services.audit, '/api/audit', { '^/api/audit': '' }));
 app.use('/api/compliance', proxyService(services.compliance, '/api/compliance', { '^/api/compliance': '/api/v1' }));
