@@ -133,6 +133,9 @@ if (NODE_ENV !== 'development' && MFA_STEPUP_SECRET === JWT_SECRET) {
 const MFA_STEPUP_AUD = 'mfa-step-up';
 const MFA_STEPUP_ISS = 'atlas-auth';
 
+const MFA_CHALLENGE_AUD = 'mfa-challenge';
+const MFA_CHALLENGE_ISS = 'atlas-auth';
+
 // OAuth at-rest encryption for sensitive provider secrets and tokens.
 // Uses OAUTH_ENCRYPTION_KEY when set, otherwise derives a 32-byte key
 // from JWT_SECRET so existing deployments still get encryption at rest
@@ -322,6 +325,31 @@ function signMfaToken(user) {
   );
 }
 
+function signMfaChallengeToken(user) {
+  const userId = typeof user === 'object' ? (user.id ?? user.user_id ?? user.sub) : user;
+  const tenantId = typeof user === 'object' ? (user.tenant_id ?? user.tenantId ?? 'default') : 'default';
+  const email = typeof user === 'object' ? (user.email ?? '') : '';
+  const jti = uuidv4();
+  // Challenge token is short-lived (5m), single-use via Redis, and must not be usable as a session token.
+  // It is signed with the main JWT secret but carries purpose=mfa_challenge and aud=mfa-challenge so
+  // session verification can reject it. Verification in /mfa/validate checks purpose/audience and jti single-use.
+  return jwt.sign(
+    {
+      sub: String(userId),
+      user_id: String(userId),
+      id: String(userId),
+      tenant_id: String(tenantId),
+      email: String(email),
+      purpose: 'mfa_challenge',
+      aud: MFA_CHALLENGE_AUD,
+      iss: MFA_CHALLENGE_ISS,
+      jti,
+    },
+    jwtSecret,
+    { algorithm: 'HS256', expiresIn: '5m' }
+  );
+}
+
 async function createRefreshToken(userId) {
   const token = crypto.randomBytes(48).toString('hex');
   const tokenHash = hashToken(token);
@@ -418,6 +446,10 @@ function requireRole(...roles) {
     try {
       const token = authHeader.slice(7);
       const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+      // Challenge tokens must not be usable as session tokens - they are only for /mfa/validate
+      if (payload.purpose === 'mfa_challenge' || payload.aud === MFA_CHALLENGE_AUD) {
+        return res.status(401).json({ message: 'MFA challenge token not valid for this endpoint' });
+      }
       if (roles.length && !roles.includes(payload.role)) {
         return res.status(403).json({ message: 'Insufficient permissions' });
       }
@@ -875,6 +907,35 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
     );
     const mfaRequired = mfaResult.rows[0]?.mfa_enabled || false;
 
+    if (mfaRequired) {
+      // Do not issue a full session yet - require second factor.
+      // Create a short-lived (5m), single-use challenge token that is only valid for /mfa/validate.
+      const mfaChallengeToken = signMfaChallengeToken(user);
+      let jti;
+      try {
+        const decoded = jwt.decode(mfaChallengeToken);
+        jti = decoded?.jti;
+      } catch {}
+      if (jti && redisClient.isOpen) {
+        try {
+          await redisClient.set(`mfa_challenge:${jti}`, String(user.id), { EX: 300, NX: true });
+        } catch (e) {
+          console.error('Failed to store MFA challenge jti', e.message);
+        }
+      }
+      await sendAuditEvent('auth.login_mfa_required', user.id, email, {
+        device_trusted: deviceTrusted,
+        device_id: deviceId,
+        ip_address: req.ip,
+        user_agent: req.headers['user-agent']
+      });
+      return res.status(200).json({
+        message: 'MFA required',
+        mfa_required: true,
+        mfa_challenge_token: mfaChallengeToken
+      });
+    }
+
     const token = signAccessToken(user);
     const refreshToken = await createRefreshToken(user.id);
 
@@ -895,7 +956,7 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
 
     await sendAuditEvent('auth.login', user.id, email, {
       device_trusted: deviceTrusted,
-      mfa_required: mfaRequired,
+      mfa_required: false,
       device_id: deviceId,
       ip_address: req.ip,
       user_agent: req.headers['user-agent'],
@@ -908,7 +969,7 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
       session_id: sessionId,
       user: sanitizeUser(user),
       device_trusted: deviceTrusted,
-      mfa_required: mfaRequired
+      mfa_required: false
     });
   } catch (error) {
     console.error(error);
@@ -1111,45 +1172,157 @@ app.post('/mfa/verify', requireRole(), createUserRateLimiter('mfa_verify', 10), 
   }
 });
 
-app.post('/mfa/validate', requireRole(), createUserRateLimiter('mfa_validate', 10), async (req, res) => {
+app.post('/mfa/validate', createUserRateLimiter('mfa_validate', 10), async (req, res) => {
   try {
-    const { token, backup_code } = req.body;
+    const { token, backup_code, mfa_challenge_token } = req.body;
     if (!token && !backup_code) {
       return res.status(400).json({ message: 'Token or backup code is required' });
     }
 
-    const userId = req.user.id;
+    let userId;
+    let user;
+    let challengeJti = null;
+    let isChallengeFlow = false;
+
+    if (mfa_challenge_token) {
+      // Login MFA challenge flow: verify short-lived single-use challenge token issued by /login
+      let payload;
+      try {
+        payload = jwt.verify(mfa_challenge_token, jwtSecret, {
+          algorithms: ['HS256'],
+          audience: MFA_CHALLENGE_AUD,
+          issuer: MFA_CHALLENGE_ISS,
+        });
+      } catch (err) {
+        if (err.name === 'TokenExpiredError') {
+          return res.status(401).json({ message: 'MFA challenge token expired' });
+        }
+        return res.status(401).json({ message: 'Invalid MFA challenge token' });
+      }
+      if (payload.purpose !== 'mfa_challenge') {
+        return res.status(401).json({ message: 'Invalid challenge token purpose' });
+      }
+      const jti = payload.jti;
+      if (!jti) {
+        return res.status(401).json({ message: 'Challenge token missing jti' });
+      }
+      // Enforce single-use via Redis (5 minute TTL). If Redis is open, the jti must still exist.
+      if (redisClient.isOpen) {
+        const key = `mfa_challenge:${jti}`;
+        const exists = await redisClient.get(key);
+        if (!exists) {
+          return res.status(401).json({ message: 'MFA challenge token already used or expired' });
+        }
+        challengeJti = jti;
+      } else {
+        challengeJti = jti;
+      }
+      userId = parseInt(payload.sub || payload.user_id || payload.id, 10);
+      if (!userId) {
+        return res.status(400).json({ message: 'Invalid challenge token subject' });
+      }
+      const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+      user = userResult.rows[0];
+      if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      if (!user.active) {
+        return res.status(403).json({ message: 'Account is deactivated' });
+      }
+      isChallengeFlow = true;
+    } else {
+      // Step-up flow: require a valid Bearer session token
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ message: 'Authentication required' });
+      }
+      const bearer = authHeader.slice(7);
+      let payload;
+      try {
+        payload = jwt.verify(bearer, jwtSecret, { algorithms: ['HS256'] });
+        if (payload.purpose === 'mfa_challenge' || payload.aud === MFA_CHALLENGE_AUD) {
+          return res.status(401).json({ message: 'MFA challenge token not valid for this endpoint' });
+        }
+      } catch {
+        return res.status(401).json({ message: 'Invalid or expired token' });
+      }
+      userId = payload.id;
+      const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+      user = userResult.rows[0];
+      if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      req.user = payload;
+    }
+
     const result = await pool.query('SELECT * FROM user_mfa WHERE user_id = $1 AND mfa_enabled = true', [userId]);
     if (!result.rows[0]) {
       return res.status(400).json({ message: 'MFA is not enabled for this user' });
     }
-
     const mfa = result.rows[0];
 
+    let validated = false;
+    let method = null;
     if (token) {
       const isValid = authenticator.check(token, mfa.mfa_secret);
       if (isValid) {
-        const mfaToken = signMfaToken(req.user);
-        await sendAuditEvent('auth.mfa_validate', userId, req.user.email, { method: 'totp' });
-        return res.json({ message: 'Token validated', validated: true, mfa_token: mfaToken });
+        validated = true;
+        method = 'totp';
       }
     }
-
-    if (backup_code) {
+    if (!validated && backup_code) {
       const codes = typeof mfa.backup_codes === 'string' ? JSON.parse(mfa.backup_codes) : mfa.backup_codes;
       if (Array.isArray(codes)) {
         const idx = codes.indexOf(backup_code);
         if (idx !== -1) {
           codes.splice(idx, 1);
           await pool.query('UPDATE user_mfa SET backup_codes = $1::jsonb WHERE user_id = $2', [JSON.stringify(codes), userId]);
-          const mfaToken = signMfaToken(req.user);
-          await sendAuditEvent('auth.mfa_validate', userId, req.user.email, { method: 'backup_code' });
-          return res.json({ message: 'Backup code accepted', validated: true, mfa_token: mfaToken });
+          validated = true;
+          method = 'backup_code';
         }
       }
     }
+    if (!validated) {
+      return res.status(400).json({ message: 'Invalid token or backup code' });
+    }
 
-    res.status(400).json({ message: 'Invalid token or backup code' });
+    // Consume challenge token after successful validation (single-use)
+    if (isChallengeFlow && challengeJti && redisClient.isOpen) {
+      try {
+        await redisClient.del(`mfa_challenge:${challengeJti}`);
+      } catch {}
+    }
+
+    if (isChallengeFlow) {
+      // Issue full session for login completion
+      const accessToken = signAccessToken(user);
+      const refreshToken = await createRefreshToken(user.id);
+      const sessionId = uuidv4();
+      await pool.query(
+        `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
+        [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', req.headers['x-device-id'] || null,
+         new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
+      );
+      res.cookie('refreshToken', refreshToken, {
+        httpOnly: true,
+        secure: NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+      });
+      await sendAuditEvent('auth.mfa_validate', userId, user.email, { method, mfa_challenge: true });
+      return res.json({
+        message: 'MFA validated, logged in successfully',
+        token: accessToken,
+        session_id: sessionId,
+        user: sanitizeUser(user),
+        validated: true,
+      });
+    } else {
+      const mfaToken = signMfaToken(req.user);
+      await sendAuditEvent('auth.mfa_validate', userId, user.email, { method });
+      return res.json({ message: 'Token validated', validated: true, mfa_token: mfaToken });
+    }
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'MFA validation failed' });
