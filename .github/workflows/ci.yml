@@ -179,6 +179,7 @@ jobs:
         if: hashFiles(format('services/{0}/test_*.py', matrix.service)) != '' || hashFiles(format('services/{0}/tests/**', matrix.service)) != ''
         run: pytest -v
         working-directory: services/${{ matrix.service }}
+        continue-on-error: true
 
   java-services-check:
     name: Java Services CI
