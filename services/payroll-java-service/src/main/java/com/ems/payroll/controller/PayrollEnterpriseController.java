@@ -4,10 +4,12 @@ import com.ems.payroll.model.*;
 import com.atlas.common.security.RequiresRole;
 import com.atlas.common.security.TenantId;
 import com.ems.payroll.service.PayrollEnterpriseService;
+import com.ems.payroll.util.Money;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -69,9 +71,9 @@ public class PayrollEnterpriseController {
                     tenantId,
                     (String) req.get("employeeId"),
                     (String) req.get("period"),
-                    Double.valueOf(req.getOrDefault("baseSalary", "0").toString()),
-                    Double.valueOf(req.getOrDefault("allowances", "0").toString()),
-                    Double.valueOf(req.getOrDefault("deductions", "0").toString()),
+                    Money.of(req.getOrDefault("baseSalary", "0")),
+                    Money.of(req.getOrDefault("allowances", "0")),
+                    Money.of(req.getOrDefault("deductions", "0")),
                     (String) req.getOrDefault("country", "US"),
                     (String) req.getOrDefault("currency", "USD"));
             return ResponseEntity.ok(record);
@@ -120,7 +122,7 @@ public class PayrollEnterpriseController {
             @TenantId String tenantId,
             @RequestBody Map<String, Object> req) {
         String country = (String) req.getOrDefault("country", "US");
-        Double grossSalary = Double.valueOf(req.getOrDefault("grossSalary", "0").toString());
+        BigDecimal grossSalary = Money.of(req.getOrDefault("grossSalary", "0"));
         return ResponseEntity.ok(service.simulateTax(tenantId, country, grossSalary));
     }
 
@@ -131,7 +133,7 @@ public class PayrollEnterpriseController {
             @RequestBody Map<String, Object> req) {
         @SuppressWarnings("unchecked")
         List<String> countries = (List<String>) req.getOrDefault("countries", List.of("US"));
-        Double grossSalary = Double.valueOf(req.getOrDefault("grossSalary", "0").toString());
+        BigDecimal grossSalary = Money.of(req.getOrDefault("grossSalary", "0"));
         return ResponseEntity.ok(service.compareCountryTax(tenantId, countries, grossSalary));
     }
 
@@ -194,7 +196,7 @@ public class PayrollEnterpriseController {
                 tenantId,
                 Long.valueOf(req.getOrDefault("payrollId", "0").toString()),
                 (String) req.get("employeeId"),
-                Double.valueOf(req.getOrDefault("amount", "0").toString()),
+                Money.of(req.getOrDefault("amount", "0")),
                 (String) req.get("accountNumber"),
                 (String) req.get("routingNumber"),
                 (String) req.getOrDefault("bankName", ""));
@@ -241,7 +243,7 @@ public class PayrollEnterpriseController {
                 tenantId,
                 (String) req.get("employeeId"),
                 (String) req.get("category"),
-                Double.valueOf(req.getOrDefault("amount", "0").toString()),
+                Money.of(req.getOrDefault("amount", "0")),
                 (String) req.getOrDefault("description", ""),
                 (String) req.getOrDefault("receiptUrl", ""));
         return ResponseEntity.ok(expense);
@@ -283,9 +285,9 @@ public class PayrollEnterpriseController {
                 (String) req.get("name"),
                 (String) req.get("type"),
                 (String) req.getOrDefault("description", ""),
-                Double.valueOf(req.getOrDefault("employerContribution", "0").toString()),
-                Double.valueOf(req.getOrDefault("employeeContribution", "0").toString()),
-                Double.valueOf(req.getOrDefault("maxBenefitAmount", "0").toString()));
+                Money.of(req.getOrDefault("employerContribution", "0")),
+                Money.of(req.getOrDefault("employeeContribution", "0")),
+                Money.of(req.getOrDefault("maxBenefitAmount", "0")));
         return ResponseEntity.ok(plan);
     }
 
@@ -325,8 +327,8 @@ public class PayrollEnterpriseController {
         CompensationPlan plan = service.createCompensationPlan(
                 tenantId,
                 (String) req.get("employeeId"),
-                Double.valueOf(req.getOrDefault("currentSalary", "0").toString()),
-                Double.valueOf(req.getOrDefault("proposedSalary", "0").toString()),
+                Money.of(req.getOrDefault("currentSalary", "0")),
+                Money.of(req.getOrDefault("proposedSalary", "0")),
                 (String) req.getOrDefault("currency", "USD"),
                 (String) req.getOrDefault("reason", ""),
                 (String) req.getOrDefault("reviewCycle", "annual"));
@@ -351,7 +353,7 @@ public class PayrollEnterpriseController {
         Bonus bonus = service.createBonus(
                 tenantId,
                 (String) req.get("employeeId"),
-                Double.valueOf(req.getOrDefault("amount", "0").toString()),
+                Money.of(req.getOrDefault("amount", "0")),
                 (String) req.getOrDefault("type", "performance"),
                 (String) req.getOrDefault("reason", ""));
         return ResponseEntity.ok(bonus);
@@ -383,9 +385,9 @@ public class PayrollEnterpriseController {
         EquityGrant grant = service.createEquityGrant(
                 tenantId,
                 (String) req.get("employeeId"),
-                Double.valueOf(req.getOrDefault("shares", "0").toString()),
-                Double.valueOf(req.getOrDefault("strikePrice", "0").toString()),
-                Double.valueOf(req.getOrDefault("fairMarketValue", "0").toString()),
+                req.get("shares") == null ? null : new BigDecimal(req.get("shares").toString()),
+                Money.of(req.getOrDefault("strikePrice", "0")),
+                Money.of(req.getOrDefault("fairMarketValue", "0")),
                 (String) req.getOrDefault("equityType", "NSO"),
                 (String) req.getOrDefault("vestingSchedule", "4-year standard"));
         return ResponseEntity.ok(grant);
@@ -419,11 +421,11 @@ public class PayrollEnterpriseController {
                 (String) req.get("role"),
                 (String) req.getOrDefault("experience", "mid"),
                 (String) req.getOrDefault("location", ""),
-                Double.valueOf(req.getOrDefault("p10", "0").toString()),
-                Double.valueOf(req.getOrDefault("p25", "0").toString()),
-                Double.valueOf(req.getOrDefault("p50", "0").toString()),
-                Double.valueOf(req.getOrDefault("p75", "0").toString()),
-                Double.valueOf(req.getOrDefault("p90", "0").toString()),
+                Money.of(req.getOrDefault("p10", "0")),
+                Money.of(req.getOrDefault("p25", "0")),
+                Money.of(req.getOrDefault("p50", "0")),
+                Money.of(req.getOrDefault("p75", "0")),
+                Money.of(req.getOrDefault("p90", "0")),
                 (String) req.getOrDefault("currency", "USD"),
                 (String) req.getOrDefault("source", "internal"));
         return ResponseEntity.ok(benchmark);
@@ -439,7 +441,7 @@ public class PayrollEnterpriseController {
                 (String) req.get("role"),
                 (String) req.getOrDefault("experience", "mid"),
                 (String) req.getOrDefault("location", ""),
-                Double.valueOf(req.getOrDefault("currentSalary", "0").toString())));
+                Money.of(req.getOrDefault("currentSalary", "0"))));
     }
 
     // ============================================================

@@ -3,6 +3,7 @@ package com.ems.payroll.model;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -14,9 +15,11 @@ public class CompensationPlan {
     private String employeeId;
     private String tenantId;
     @Min(0) @PositiveOrZero
-    private Double currentBaseSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal currentBaseSalary;
     @Min(0) @PositiveOrZero
-    private Double proposedBaseSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal proposedBaseSalary;
     private String currency;
     private LocalDate effectiveDate;
     private String reason;
@@ -34,10 +37,10 @@ public class CompensationPlan {
     public void setEmployeeId(String employeeId) { this.employeeId = employeeId; }
     public String getTenantId() { return tenantId; }
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
-    public Double getCurrentBaseSalary() { return currentBaseSalary; }
-    public void setCurrentBaseSalary(Double currentBaseSalary) { this.currentBaseSalary = currentBaseSalary; }
-    public Double getProposedBaseSalary() { return proposedBaseSalary; }
-    public void setProposedBaseSalary(Double proposedBaseSalary) { this.proposedBaseSalary = proposedBaseSalary; }
+    public BigDecimal getCurrentBaseSalary() { return currentBaseSalary; }
+    public void setCurrentBaseSalary(BigDecimal currentBaseSalary) { this.currentBaseSalary = currentBaseSalary; }
+    public BigDecimal getProposedBaseSalary() { return proposedBaseSalary; }
+    public void setProposedBaseSalary(BigDecimal proposedBaseSalary) { this.proposedBaseSalary = proposedBaseSalary; }
     public String getCurrency() { return currency; }
     public void setCurrency(String currency) { this.currency = currency; }
     public LocalDate getEffectiveDate() { return effectiveDate; }

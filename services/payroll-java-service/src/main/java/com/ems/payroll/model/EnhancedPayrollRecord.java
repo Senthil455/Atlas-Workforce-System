@@ -3,6 +3,7 @@ package com.ems.payroll.model;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -19,21 +20,29 @@ public class EnhancedPayrollRecord {
     private String country;
     private String currency;
     @Min(0) @PositiveOrZero
-    private Double baseSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal baseSalary;
     @Min(0) @PositiveOrZero
-    private Double allowances;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal allowances;
     @Min(0) @PositiveOrZero
-    private Double deductions;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal deductions;
     @Min(0) @PositiveOrZero
-    private Double tax;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal tax;
     @Min(0) @PositiveOrZero
-    private Double socialSecurity;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal socialSecurity;
     @Min(0) @PositiveOrZero
-    private Double medicare;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal medicare;
     @Min(0) @PositiveOrZero
-    private Double netSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal netSalary;
     @Min(0) @PositiveOrZero
-    private Double grossSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal grossSalary;
     private String paymentMethod;
     private String bankAccount;
     private String bankRouting;
@@ -56,22 +65,22 @@ public class EnhancedPayrollRecord {
     public void setCountry(String country) { this.country = country; }
     public String getCurrency() { return currency; }
     public void setCurrency(String currency) { this.currency = currency; }
-    public Double getBaseSalary() { return baseSalary; }
-    public void setBaseSalary(Double baseSalary) { this.baseSalary = baseSalary; }
-    public Double getAllowances() { return allowances; }
-    public void setAllowances(Double allowances) { this.allowances = allowances; }
-    public Double getDeductions() { return deductions; }
-    public void setDeductions(Double deductions) { this.deductions = deductions; }
-    public Double getTax() { return tax; }
-    public void setTax(Double tax) { this.tax = tax; }
-    public Double getSocialSecurity() { return socialSecurity; }
-    public void setSocialSecurity(Double socialSecurity) { this.socialSecurity = socialSecurity; }
-    public Double getMedicare() { return medicare; }
-    public void setMedicare(Double medicare) { this.medicare = medicare; }
-    public Double getNetSalary() { return netSalary; }
-    public void setNetSalary(Double netSalary) { this.netSalary = netSalary; }
-    public Double getGrossSalary() { return grossSalary; }
-    public void setGrossSalary(Double grossSalary) { this.grossSalary = grossSalary; }
+    public BigDecimal getBaseSalary() { return baseSalary; }
+    public void setBaseSalary(BigDecimal baseSalary) { this.baseSalary = baseSalary; }
+    public BigDecimal getAllowances() { return allowances; }
+    public void setAllowances(BigDecimal allowances) { this.allowances = allowances; }
+    public BigDecimal getDeductions() { return deductions; }
+    public void setDeductions(BigDecimal deductions) { this.deductions = deductions; }
+    public BigDecimal getTax() { return tax; }
+    public void setTax(BigDecimal tax) { this.tax = tax; }
+    public BigDecimal getSocialSecurity() { return socialSecurity; }
+    public void setSocialSecurity(BigDecimal socialSecurity) { this.socialSecurity = socialSecurity; }
+    public BigDecimal getMedicare() { return medicare; }
+    public void setMedicare(BigDecimal medicare) { this.medicare = medicare; }
+    public BigDecimal getNetSalary() { return netSalary; }
+    public void setNetSalary(BigDecimal netSalary) { this.netSalary = netSalary; }
+    public BigDecimal getGrossSalary() { return grossSalary; }
+    public void setGrossSalary(BigDecimal grossSalary) { this.grossSalary = grossSalary; }
     public String getPaymentMethod() { return paymentMethod; }
     public void setPaymentMethod(String paymentMethod) { this.paymentMethod = paymentMethod; }
     public String getBankAccount() { return bankAccount; }

@@ -1,6 +1,7 @@
 package com.ems.payroll.model;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -16,8 +17,10 @@ public class BenefitEnrollment {
     private LocalDate effectiveDate;
     private LocalDate terminationDate;
     private String status;
-    private Double employeeContribution;
-    private Double employerContribution;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal employeeContribution;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal employerContribution;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -39,10 +42,10 @@ public class BenefitEnrollment {
     public void setTerminationDate(LocalDate terminationDate) { this.terminationDate = terminationDate; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
-    public Double getEmployeeContribution() { return employeeContribution; }
-    public void setEmployeeContribution(Double employeeContribution) { this.employeeContribution = employeeContribution; }
-    public Double getEmployerContribution() { return employerContribution; }
-    public void setEmployerContribution(Double employerContribution) { this.employerContribution = employerContribution; }
+    public BigDecimal getEmployeeContribution() { return employeeContribution; }
+    public void setEmployeeContribution(BigDecimal employeeContribution) { this.employeeContribution = employeeContribution; }
+    public BigDecimal getEmployerContribution() { return employerContribution; }
+    public void setEmployerContribution(BigDecimal employerContribution) { this.employerContribution = employerContribution; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

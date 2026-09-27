@@ -1,6 +1,7 @@
 package com.ems.payroll.model;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -12,9 +13,12 @@ public class BenefitPlan {
     private String name;
     private String type;
     private String description;
-    private Double employerContribution;
-    private Double employeeContribution;
-    private Double maxBenefitAmount;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal employerContribution;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal employeeContribution;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal maxBenefitAmount;
     private Integer maxParticipants;
     private Integer currentParticipants;
     private Boolean isActive;
@@ -36,12 +40,12 @@ public class BenefitPlan {
     public void setType(String type) { this.type = type; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
-    public Double getEmployerContribution() { return employerContribution; }
-    public void setEmployerContribution(Double employerContribution) { this.employerContribution = employerContribution; }
-    public Double getEmployeeContribution() { return employeeContribution; }
-    public void setEmployeeContribution(Double employeeContribution) { this.employeeContribution = employeeContribution; }
-    public Double getMaxBenefitAmount() { return maxBenefitAmount; }
-    public void setMaxBenefitAmount(Double maxBenefitAmount) { this.maxBenefitAmount = maxBenefitAmount; }
+    public BigDecimal getEmployerContribution() { return employerContribution; }
+    public void setEmployerContribution(BigDecimal employerContribution) { this.employerContribution = employerContribution; }
+    public BigDecimal getEmployeeContribution() { return employeeContribution; }
+    public void setEmployeeContribution(BigDecimal employeeContribution) { this.employeeContribution = employeeContribution; }
+    public BigDecimal getMaxBenefitAmount() { return maxBenefitAmount; }
+    public void setMaxBenefitAmount(BigDecimal maxBenefitAmount) { this.maxBenefitAmount = maxBenefitAmount; }
     public Integer getMaxParticipants() { return maxParticipants; }
     public void setMaxParticipants(Integer maxParticipants) { this.maxParticipants = maxParticipants; }
     public Integer getCurrentParticipants() { return currentParticipants; }

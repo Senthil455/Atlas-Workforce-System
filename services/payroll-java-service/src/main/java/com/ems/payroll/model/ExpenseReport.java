@@ -3,6 +3,7 @@ package com.ems.payroll.model;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -15,7 +16,8 @@ public class ExpenseReport {
     private String tenantId;
     private String category;
     @Min(0) @PositiveOrZero
-    private Double amount;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal amount;
     @Column(columnDefinition = "TEXT")
     private String description;
     private String receiptUrl;
@@ -37,8 +39,8 @@ public class ExpenseReport {
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
     public String getCategory() { return category; }
     public void setCategory(String category) { this.category = category; }
-    public Double getAmount() { return amount; }
-    public void setAmount(Double amount) { this.amount = amount; }
+    public BigDecimal getAmount() { return amount; }
+    public void setAmount(BigDecimal amount) { this.amount = amount; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
     public String getReceiptUrl() { return receiptUrl; }

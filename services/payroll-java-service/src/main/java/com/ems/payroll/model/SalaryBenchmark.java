@@ -3,6 +3,7 @@ package com.ems.payroll.model;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -16,15 +17,20 @@ public class SalaryBenchmark {
     private String location;
     private String industry;
     @Min(0) @PositiveOrZero
-    private Double percentile10;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal percentile10;
     @Min(0) @PositiveOrZero
-    private Double percentile25;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal percentile25;
     @Min(0) @PositiveOrZero
-    private Double percentile50;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal percentile50;
     @Min(0) @PositiveOrZero
-    private Double percentile75;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal percentile75;
     @Min(0) @PositiveOrZero
-    private Double percentile90;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal percentile90;
     private String currency;
     private String source;
     private String year;
@@ -44,16 +50,16 @@ public class SalaryBenchmark {
     public void setLocation(String location) { this.location = location; }
     public String getIndustry() { return industry; }
     public void setIndustry(String industry) { this.industry = industry; }
-    public Double getPercentile10() { return percentile10; }
-    public void setPercentile10(Double percentile10) { this.percentile10 = percentile10; }
-    public Double getPercentile25() { return percentile25; }
-    public void setPercentile25(Double percentile25) { this.percentile25 = percentile25; }
-    public Double getPercentile50() { return percentile50; }
-    public void setPercentile50(Double percentile50) { this.percentile50 = percentile50; }
-    public Double getPercentile75() { return percentile75; }
-    public void setPercentile75(Double percentile75) { this.percentile75 = percentile75; }
-    public Double getPercentile90() { return percentile90; }
-    public void setPercentile90(Double percentile90) { this.percentile90 = percentile90; }
+    public BigDecimal getPercentile10() { return percentile10; }
+    public void setPercentile10(BigDecimal percentile10) { this.percentile10 = percentile10; }
+    public BigDecimal getPercentile25() { return percentile25; }
+    public void setPercentile25(BigDecimal percentile25) { this.percentile25 = percentile25; }
+    public BigDecimal getPercentile50() { return percentile50; }
+    public void setPercentile50(BigDecimal percentile50) { this.percentile50 = percentile50; }
+    public BigDecimal getPercentile75() { return percentile75; }
+    public void setPercentile75(BigDecimal percentile75) { this.percentile75 = percentile75; }
+    public BigDecimal getPercentile90() { return percentile90; }
+    public void setPercentile90(BigDecimal percentile90) { this.percentile90 = percentile90; }
     public String getCurrency() { return currency; }
     public void setCurrency(String currency) { this.currency = currency; }
     public String getSource() { return source; }
