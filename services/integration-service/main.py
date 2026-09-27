@@ -87,6 +87,38 @@ def get_db() -> Session:
         db.close()
 
 
+def _migrate_delivery_retry_constraint():
+    # Backfill pre-fix PENDING rows left with NULL next_retry_at, then add the
+    # CHECK constraint on Postgres deployments that predate it. Fresh databases
+    # get the constraint from create_all. Best effort: never block startup.
+    try:
+        from sqlalchemy import text
+
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(text(
+                    "UPDATE integration_webhook_delivery_logs "
+                    "SET next_retry_at = NOW() "
+                    "WHERE status = 'PENDING' AND next_retry_at IS NULL"
+                ))
+                conn.execute(text(
+                    "DO $$ BEGIN "
+                    "IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+                    "WHERE conname = 'ck_delivery_pending_has_retry') THEN "
+                    "ALTER TABLE integration_webhook_delivery_logs ADD CONSTRAINT "
+                    "ck_delivery_pending_has_retry CHECK (status <> 'PENDING' OR next_retry_at IS NOT NULL); "
+                    "END IF; END $$;"
+                ))
+            else:
+                conn.execute(text(
+                    "UPDATE integration_webhook_delivery_logs "
+                    "SET next_retry_at = CURRENT_TIMESTAMP "
+                    "WHERE status = 'PENDING' AND next_retry_at IS NULL"
+                ))
+    except Exception as e:
+        logger.warning(f"Delivery retry constraint migration skipped: {e}")
+
+
 
 async def verify_internal_key(x_internal_key: str = Header(...)):
     if x_internal_key != INTERNAL_API_KEY:
@@ -97,6 +129,7 @@ async def verify_internal_key(x_internal_key: str = Header(...)):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    _migrate_delivery_retry_constraint()
     start_rabbitmq_consumer()
 
     def _background_loop():
