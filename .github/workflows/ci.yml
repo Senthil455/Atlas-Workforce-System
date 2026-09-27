@@ -213,6 +213,14 @@ jobs:
         run: mvn clean test
         working-directory: services/${{ matrix.service }}
 
+  docker-user-check:
+    name: Docker Non-Root User Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify every image declares a non-root USER
+        run: bash scripts/check-docker-nonroot.sh
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest

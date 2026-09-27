@@ -11,6 +11,18 @@ FROM python:3.10-alpine
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 COPY services/workforce-planning-service/ .
-ENV PATH=/root/.local/bin:$PATH
+ENV PATH=/home/appuser/.local/bin:$PATH
+ENV HOME=/home/appuser
+
+# Run as non-root to match k8s runAsUser 1001 (runAsNonRoot).
+# Installed wheels live in /root/.local, so copy them to the app user home.
+RUN addgroup -S -g 1001 appgroup && \
+    adduser -S -u 1001 -G appgroup -h /home/appuser appuser && \
+    cp -r /root/.local /home/appuser/.local && \
+    chown -R appuser:appgroup /home/appuser /app
+
 EXPOSE 8017
+
+USER appuser
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8017"]

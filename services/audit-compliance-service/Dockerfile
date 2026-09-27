@@ -21,6 +21,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY services/audit-compliance-service/ .
 
+# Run as non-root to match k8s runAsUser 1001 (runAsNonRoot).
+RUN groupadd -r -g 1001 appgroup && \
+    useradd -r -u 1001 -g appgroup -m -d /home/appuser appuser && \
+    chown -R appuser:appgroup /app /home/appuser
+
 EXPOSE 8011
+
+USER appuser
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8011"]

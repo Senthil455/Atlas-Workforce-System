@@ -18,8 +18,10 @@ FROM python:3.10-slim AS runtime
 
 WORKDIR /app
 
-# Create non-root user
-RUN addgroup --system app && adduser --system --ingroup app app
+# Create non-root user with the fixed k8s UID/GID (runAsUser 1001)
+RUN groupadd -r -g 1001 appgroup && \
+    useradd -r -u 1001 -g appgroup -m -d /home/appuser appuser && \
+    chown -R appuser:appgroup /app /home/appuser
 
 # Copy Python wheels from builder
 COPY --from=builder /app/wheels /wheels
@@ -33,8 +35,11 @@ RUN pip install -e ./services/atlas_observability
 # Copy application code
 COPY services/ai-copilot-service/ .
 
-# Switch to non-root user
-USER app
+# App files were copied as root after user creation, so fix ownership.
+RUN chown -R appuser:appgroup /app
+
+# Switch to non-root user (uid 1001, matches k8s runAsUser)
+USER appuser
 
 EXPOSE 8015
 
