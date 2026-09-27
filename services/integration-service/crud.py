@@ -14,6 +14,7 @@ from models import (
     Webhook,
     WebhookDeliveryLog,
 )
+from ssrf_guard import SSRFBlockedError, validate_webhook_headers, validate_webhook_url
 
 
 def list_webhooks(
@@ -36,6 +37,12 @@ def get_webhook(db: Session, webhook_id: UUID, tenant_id: str) -> Optional[Webho
 
 
 def create_webhook(db: Session, tenant_id: str, data: dict) -> Webhook:
+    url = data.get("url", "")
+    try:
+        validate_webhook_url(url)
+        validate_webhook_headers(data.get("headers"))
+    except SSRFBlockedError as e:
+        raise ValueError(str(e))
     webhook = Webhook(tenant_id=tenant_id, **data)
     db.add(webhook)
     db.commit()
@@ -47,6 +54,16 @@ def update_webhook(db: Session, webhook_id: UUID, tenant_id: str, data: dict) ->
     webhook = get_webhook(db, webhook_id, tenant_id)
     if not webhook:
         return None
+    if "url" in data and data["url"] is not None:
+        try:
+            validate_webhook_url(data["url"])
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
+    if "headers" in data and data["headers"] is not None:
+        try:
+            validate_webhook_headers(data["headers"])
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
     for key, value in data.items():
         if value is not None:
             setattr(webhook, key, value)

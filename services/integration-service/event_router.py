@@ -136,7 +136,19 @@ def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers,
         db = get_db()
         if db:
             try:
-                if 200 <= status_code < 300:
+                if isinstance(response_body, str) and response_body.startswith("Blocked destination:"):
+                    update_delivery_log(db, log_id, {
+                        "status": "FAILED",
+                        "status_code": status_code,
+                        "response_body": response_body,
+                    })
+                elif isinstance(response_body, str) and response_body.startswith("Blocked headers:"):
+                    update_delivery_log(db, log_id, {
+                        "status": "FAILED",
+                        "status_code": status_code,
+                        "response_body": response_body,
+                    })
+                elif 200 <= status_code < 300:
                     update_delivery_log(db, log_id, {
                         "status": "DELIVERED",
                         "status_code": status_code,
