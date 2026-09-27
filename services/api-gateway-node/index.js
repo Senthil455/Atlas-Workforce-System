@@ -601,6 +601,8 @@ const PUBLIC_PREFIXES = [
   '/health',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/auth/password/reset-request',
+  '/api/auth/password/reset',
   '/api/auth/passwordless/request',
   '/api/auth/passwordless/verify',
   '/api/auth/saml/acs',

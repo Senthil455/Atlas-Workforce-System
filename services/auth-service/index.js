@@ -557,6 +557,31 @@ async function sendAuditEvent(eventType, userId, email, details = {}) {
   }
 }
 
+function getFrontendUrl() {
+  return (process.env.FRONTEND_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+}
+
+// Email sender abstraction. No SMTP is configured in this repo, so the
+// default implementation is a no-op that logs the message. This keeps the
+// password reset flow testable in development without an SMTP server.
+// If SMTP settings are provided via env, this function is the single
+// place to plug in a real transport.
+async function sendEmail({ to, subject, text }) {
+  try {
+    console.log(`[email] to=${to} subject=${subject} body=${text}`);
+    return true;
+  } catch (err) {
+    console.error('Email send failed:', err.message);
+    return false;
+  }
+}
+
+async function sendPasswordResetEmail(email, rawToken, resetUrl) {
+  const subject = 'Reset your Atlas password';
+  const text = `You requested a password reset for your Atlas account.\n\nReset link (valid for 1 hour, single use): ${resetUrl}\n\nIf you did not request this, you can ignore this email.`;
+  return sendEmail({ to: email, subject, text });
+}
+
 function formatScimUser(user, baseUrl) {
   const nameParts = (user.name || '').split(' ');
   return {
@@ -695,6 +720,17 @@ async function initDB() {
       token VARCHAR(64) PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       email VARCHAR(255) NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      used BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash VARCHAR(64) NOT NULL UNIQUE,
       expires_at TIMESTAMP NOT NULL,
       used BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT NOW()
@@ -1620,7 +1656,7 @@ app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30
 
 app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create', 20), async (req, res) => {
   try {
-    const { userName, name, emails, roles, active, externalId } = req.body;
+    const { userName, name, emails, roles, active, externalId, password } = req.body;
 
     if (!userName) {
       return sendScimError(res, 400, 'userName is required');
@@ -1638,8 +1674,20 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
       return sendScimError(res, 409, 'User already exists');
     }
 
-    const tempPassword = crypto.randomBytes(16).toString('hex');
-    const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_COST);
+    let passwordToHash;
+    if (password && typeof password === 'string' && password.length > 0) {
+      const passwordError = validatePassword(password);
+      if (passwordError) {
+        return sendScimError(res, 400, passwordError);
+      }
+      passwordToHash = password;
+    } else {
+      // No usable credential is emailed for generated passwords, so the
+      // account must be activated via POST /auth/password/reset-request
+      // or POST /auth/admin/password-reset.
+      passwordToHash = crypto.randomBytes(16).toString('hex');
+    }
+    const hashedPassword = await bcrypt.hash(passwordToHash, BCRYPT_COST);
 
     const result = await pool.query(
       'INSERT INTO users (email, password, name, role, active) VALUES ($1, $2, $3, $4, $5) RETURNING *',
@@ -2108,6 +2156,143 @@ app.post('/auth/passwordless/verify', createUserRateLimiter('passwordless_verify
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Magic link verification failed' });
+  }
+});
+
+// Request a password reset. Always returns 200 with a generic message so
+// callers cannot enumerate accounts. The raw token is emailed via the
+// email sender abstraction and only the SHA-256 hash is stored.
+app.post('/auth/password/reset-request', createUserRateLimiter('password_reset_request', 5), async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const normalizedEmail = email.trim();
+    const genericMessage = 'If an account exists for this email, a reset link has been sent.';
+
+    const userResult = await pool.query('SELECT id, email, active FROM users WHERE email = $1', [normalizedEmail]);
+    const user = userResult.rows[0];
+
+    if (!user || !user.active) {
+      await sendAuditEvent('auth.password_reset_requested', user?.id || null, normalizedEmail, { found: false });
+      return res.json({ message: genericMessage });
+    }
+
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1 OR expires_at <= NOW()', [user.id]);
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetUrl = `${getFrontendUrl()}/reset-password?token=${rawToken}`;
+    await sendPasswordResetEmail(user.email, rawToken, resetUrl);
+    await sendAuditEvent('auth.password_reset_requested', user.id, user.email, { found: true });
+
+    const response = { message: genericMessage };
+    if (NODE_ENV !== 'production') {
+      response.reset_token = rawToken;
+      response.reset_url = resetUrl;
+    }
+    return res.json(response);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to process reset request' });
+  }
+});
+
+// Complete a password reset with a single-use token. Revokes all sessions
+// on success so stolen tokens cannot be reused.
+app.post('/auth/password/reset', createUserRateLimiter('password_reset', 10), async (req, res) => {
+  try {
+    const { token, password, new_password } = req.body;
+    const newPassword = password || new_password;
+    if (!token || !newPassword) {
+      return res.status(400).json({ message: 'Token and new password are required' });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
+
+    const tokenHash = hashToken(String(token).trim());
+    const tokenResult = await pool.query(
+      'SELECT * FROM password_reset_tokens WHERE token_hash = $1 AND used = false AND expires_at > NOW()',
+      [tokenHash]
+    );
+    const resetRow = tokenResult.rows[0];
+    if (!resetRow) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [resetRow.user_id]);
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+    if (!user.active) {
+      return res.status(403).json({ message: 'Account is deactivated' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashedPassword, user.id]);
+    await pool.query('UPDATE password_reset_tokens SET used = true WHERE token_hash = $1', [tokenHash]);
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND token_hash != $2', [user.id, tokenHash]);
+
+    await revokeAllUserSessions(user.id);
+    await clearFailedAttempts(user.email);
+    await sendAuditEvent('auth.password_reset', user.id, user.email, {});
+
+    return res.json({ message: 'Password has been reset successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Password reset failed' });
+  }
+});
+
+// Admin-only reset for SCIM provisioned or locked-out accounts.
+app.post('/auth/admin/password-reset', requireRole('admin'), createUserRateLimiter('admin_password_reset', 20), async (req, res) => {
+  try {
+    const { email, user_id, userId, password, new_password } = req.body;
+    const targetEmail = email;
+    const targetId = user_id || userId;
+    const newPassword = password || new_password;
+    if ((!targetEmail && !targetId) || !newPassword) {
+      return res.status(400).json({ message: 'Target email or user_id and a new password are required' });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
+
+    const lookup = targetId
+      ? await pool.query('SELECT * FROM users WHERE id = $1', [targetId])
+      : await pool.query('SELECT * FROM users WHERE email = $1', [targetEmail]);
+
+    const user = lookup.rows[0];
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashedPassword, user.id]);
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [user.id]);
+
+    await revokeAllUserSessions(user.id);
+    await clearFailedAttempts(user.email);
+    await sendAuditEvent('auth.admin_password_reset', user.id, user.email, { admin_id: req.user.id });
+
+    return res.json({ message: 'Password reset successfully', user: sanitizeUser({ ...user }) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Admin password reset failed' });
   }
 });
 
