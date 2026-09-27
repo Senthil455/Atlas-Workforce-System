@@ -215,6 +215,12 @@ async def clamp_page_size(page_size: int = Query(50, ge=1, le=MAX_PAGE_SIZE)) ->
     return min(page_size, MAX_PAGE_SIZE)
 
 
+def check_body_tenant(request: Request, body_tenant: Optional[str]) -> None:
+    context_tenant = getattr(request.state, "tenant_id", None)
+    if context_tenant and body_tenant and body_tenant != context_tenant:
+        raise HTTPException(status_code=403, detail="Tenant mismatch between context and body")
+
+
 # ── Health ──────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -239,10 +245,15 @@ async def health_check():
 )
 async def create_audit_entry(
     payload: AuditLogCreate,
+    request: Request,
     db: Session = Depends(get_db),
     _: bool = Depends(verify_internal_key),
 ):
-    log = create_audit_log(db, payload.model_dump(), HASH_SALT)
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        log = create_audit_log(db, payload.model_dump(), HASH_SALT)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return log
 
 
@@ -375,9 +386,13 @@ async def list_compliance_policies(
     summary="Create compliance policy",
 )
 async def create_compliance_policy(
-    payload: CompliancePolicyCreate, db: Session = Depends(get_db)
+    payload: CompliancePolicyCreate, request: Request, db: Session = Depends(get_db)
 ):
-    return create_policy(db, payload.model_dump())
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return create_policy(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.put(
@@ -453,9 +468,13 @@ async def list_compliance_violations(
     summary="Report a compliance violation",
 )
 async def report_compliance_violation(
-    payload: ComplianceViolationCreate, db: Session = Depends(get_db)
+    payload: ComplianceViolationCreate, request: Request, db: Session = Depends(get_db)
 ):
-    return create_violation(db, payload.model_dump())
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return create_violation(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.put(
@@ -548,9 +567,13 @@ async def list_retention_policies_endpoint(
     summary="Create data retention policy",
 )
 async def create_retention_policy_endpoint(
-    payload: DataRetentionPolicyCreate, db: Session = Depends(get_db)
+    payload: DataRetentionPolicyCreate, request: Request, db: Session = Depends(get_db)
 ):
-    return create_retention_policy(db, payload.model_dump())
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return create_retention_policy(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── GDPR ────────────────────────────────────────────────────────────────────
@@ -577,9 +600,13 @@ async def get_employee_consents(
     summary="Record employee consent",
 )
 async def record_employee_consent(
-    payload: GDPRConsentCreate, db: Session = Depends(get_db)
+    payload: GDPRConsentCreate, request: Request, db: Session = Depends(get_db)
 ):
-    return record_consent(db, payload.model_dump())
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return record_consent(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post(

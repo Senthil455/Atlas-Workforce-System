@@ -79,9 +79,29 @@ def _build_date_filter(model_field, start_date: Optional[datetime], end_date: Op
     return clauses
 
 
+def require_fields(data: dict, fields: list) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("Request body must be a JSON object")
+    missing = [f for f in fields if data.get(f) in (None, "")]
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+
+def resolve_tenant(data: dict, context_tenant: Optional[str] = None) -> str:
+    body_tenant = data.get("tenant_id") if isinstance(data, dict) else None
+    if context_tenant:
+        if body_tenant and body_tenant != context_tenant:
+            raise ValueError("Tenant mismatch between context and body")
+        return context_tenant
+    if not body_tenant:
+        raise ValueError("Missing required fields: tenant_id")
+    return body_tenant
+
+
 # ── Audit Logs ──────────────────────────────────────────────────────────────
 
 def create_audit_log(db: Session, data: dict[str, Any], salt: str) -> AuditLog:
+    require_fields(data, ["tenant_id", "event_type", "actor_id"])
     previous_hash = _get_latest_hash_for_tenant(db, data["tenant_id"]) or ""
     now = datetime.now(timezone.utc)
 
@@ -282,6 +302,7 @@ def get_policy(db: Session, policy_id: UUID) -> Optional[CompliancePolicy]:
 
 
 def create_policy(db: Session, data: dict[str, Any]) -> CompliancePolicy:
+    require_fields(data, ["tenant_id", "name"])
     policy = CompliancePolicy(
         tenant_id=data["tenant_id"],
         name=data["name"],
@@ -354,6 +375,7 @@ def list_violations(
 
 
 def create_violation(db: Session, data: dict[str, Any]) -> ComplianceViolation:
+    require_fields(data, ["tenant_id", "description"])
     violation = ComplianceViolation(
         tenant_id=data["tenant_id"],
         policy_id=data.get("policy_id"),
@@ -668,6 +690,7 @@ def list_retention_policies(db: Session, tenant_id: Optional[str] = None):
 
 
 def create_retention_policy(db: Session, data: dict[str, Any]) -> DataRetentionPolicy:
+    require_fields(data, ["resource_type", "retention_days"])
     policy = DataRetentionPolicy(
         tenant_id=data.get("tenant_id"),
         resource_type=data["resource_type"],
@@ -695,6 +718,9 @@ def get_consents(
 
 
 def record_consent(db: Session, data: dict[str, Any]) -> GDPRConsentRecord:
+    require_fields(data, ["employee_id", "consent_type"])
+    if data.get("granted") is None:
+        raise ValueError("Missing required fields: granted")
     if data.get("granted"):
         revoked_at = None
     else:

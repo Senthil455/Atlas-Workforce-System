@@ -36,12 +36,12 @@ from schemas import (
     CAPaginated, ConditionalAccessCreate, ConditionalAccessResponse,
     DataClassificationCreate, DataClassificationResponse,
     DataResidencyCreate, DataResidencyResponse, DLPPolicyCreate,
-    DLPPolicyResponse, DLPIncidentResponse, DLPPaginated,
+    DLPPolicyResponse, DLPIncidentCreate, DLPIncidentResponse, DLPPaginated,
     EncryptionKeyCreate, EncryptionKeyResponse,
     HealthResponse, PrivilegedAccessRequest, PrivilegedAccessResponse,
     PrivilegedRoleCreate, PrivilegedRoleResponse,
     RiskAssessmentRequest, RiskAssessmentResponse, RiskPaginated,
-    SecurityDashboard, SessionRecordingEvent, SessionRecordingResponse,
+    SecurityDashboard, SessionRecordingCreate, SessionRecordingEvent, SessionRecordingResponse,
     ZeroTrustPolicyCreate, ZeroTrustPolicyResponse, ZTAPaginated,
 )
 
@@ -73,6 +73,11 @@ async def verify_internal_key(x_internal_key: str = Header(...)):
 
 async def clamp_page_size(page_size: int = Query(50, ge=1, le=MAX_PAGE_SIZE)) -> int:
     return min(page_size, MAX_PAGE_SIZE)
+
+def check_body_tenant(request: Request, body_tenant: Optional[str]) -> None:
+    context_tenant = getattr(request.state, "tenant_id", None)
+    if context_tenant and body_tenant and body_tenant != context_tenant:
+        raise HTTPException(status_code=403, detail="Tenant mismatch between context and body")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -253,8 +258,12 @@ async def evaluate_all_ca(context: dict, tenant_id: str = Query(...), db: Sessio
 # ── Risk-Based Authentication ───────────────────────────────────────────────
 
 @app.post("/api/v1/security/risk/assess", response_model=RiskAssessmentResponse, tags=["Risk Assessment"])
-async def assess_risk_endpoint(payload: RiskAssessmentRequest, db: Session = Depends(get_db)):
-    result = assess_risk(db, payload.model_dump())
+async def assess_risk_endpoint(payload: RiskAssessmentRequest, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        result = assess_risk(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return result
 
 @app.get("/api/v1/security/risk/assessments", response_model=RiskPaginated, tags=["Risk Assessment"])
@@ -279,14 +288,18 @@ async def get_pam_role(role_id: uuid.UUID, db: Session = Depends(get_db)):
     return role
 
 @app.post("/api/v1/security/pam/requests", response_model=PrivilegedAccessResponse, tags=["PAM"])
-async def request_pam(payload: PrivilegedAccessRequest, db: Session = Depends(get_db)):
+async def request_pam(payload: PrivilegedAccessRequest, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
     role = get_privileged_role(db, payload.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     if role.allowed_requester_roles and payload.requester_role not in role.allowed_requester_roles:
         logger.warning("pam.role_escalation_denied", extra={"user_id": payload.user_id, "role_id": str(payload.role_id), "requester_role": payload.requester_role})
         raise HTTPException(status_code=403, detail="Your role is not authorized to request this privileged access")
-    return request_privileged_access(db, payload.model_dump())
+    try:
+        return request_privileged_access(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/v1/security/pam/requests", tags=["PAM"])
 async def list_pam_requests(tenant_id: Optional[str] = Query(None), user_id: Optional[str] = Query(None), status: Optional[str] = Query(None), page: int = Query(1, ge=1), page_size: int = Depends(clamp_page_size), db: Session = Depends(get_db)):
@@ -354,8 +367,12 @@ async def list_dlp_incidents_endpoint(tenant_id: Optional[str] = Query(None), st
     return list_dlp_incidents(db, tenant_id, status, severity, page, page_size)
 
 @app.post("/api/v1/security/dlp/incidents", response_model=DLPIncidentResponse, status_code=201, tags=["DLP"])
-async def report_dlp_incident_endpoint(payload: dict, db: Session = Depends(get_db)):
-    return report_dlp_incident(db, payload)
+async def report_dlp_incident_endpoint(payload: DLPIncidentCreate, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return report_dlp_incident(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.put("/api/v1/security/dlp/incidents/{incident_id}/status", response_model=DLPIncidentResponse, tags=["DLP"])
 async def update_dlp_incident_endpoint(incident_id: uuid.UUID, status: str = Query(...), db: Session = Depends(get_db)):
@@ -405,8 +422,12 @@ async def check_residency(policy_id: uuid.UUID, target_region: str = Query(...),
 # ── Session Recording ───────────────────────────────────────────────────────
 
 @app.post("/api/v1/security/session-recordings/start", response_model=SessionRecordingResponse, status_code=201, tags=["Session Recording"])
-async def start_recording(payload: dict, db: Session = Depends(get_db)):
-    return start_session_recording(db, payload)
+async def start_recording(payload: SessionRecordingCreate, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return start_session_recording(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/v1/security/session-recordings/{recording_id}/stop", response_model=SessionRecordingResponse, tags=["Session Recording"])
 async def stop_recording(recording_id: uuid.UUID, db: Session = Depends(get_db)):

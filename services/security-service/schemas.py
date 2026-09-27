@@ -172,6 +172,18 @@ class DLPPolicyResponse(BaseModel):
     updated_at: datetime
     model_config = {"from_attributes": True}
 
+class DLPIncidentCreate(BaseModel):
+    tenant_id: str = Field(..., max_length=50)
+    policy_id: Optional[UUID] = None
+    user_id: Optional[str] = Field(None, max_length=100)
+    resource_type: Optional[str] = Field(None, max_length=100)
+    resource_id: Optional[str] = Field(None, max_length=200)
+    action: Optional[str] = Field(None, max_length=50)
+    data_classification: Optional[str] = Field(None, max_length=50)
+    description: Optional[str] = None
+    severity: Optional[str] = Field(None, max_length=20)
+    evidence: Optional[dict[str, Any]] = None
+
 class DLPIncidentResponse(BaseModel):
     id: UUID
     tenant_id: str
@@ -233,6 +245,16 @@ class DataResidencyResponse(BaseModel):
     enabled: bool
     created_at: datetime
     model_config = {"from_attributes": True}
+
+class SessionRecordingCreate(BaseModel):
+    tenant_id: str = Field(..., max_length=50)
+    user_id: str = Field(..., max_length=100)
+    session_id: Optional[str] = Field(None, max_length=100)
+    user_role: Optional[str] = Field(None, max_length=50)
+    recording_type: str = Field("keystroke", max_length=50)
+    events: list[dict[str, Any]] = []
+    ip_address: Optional[str] = Field(None, max_length=45)
+    user_agent: Optional[str] = None
 
 class SessionRecordingEvent(BaseModel):
     event_type: str = Field(..., max_length=50)
