@@ -1,15 +1,26 @@
+import json
+import logging
 import os
 import random
-import json
 from typing import Any
 from datetime import datetime, timedelta, timezone
 
+logger = logging.getLogger(__name__)
+
+client = None
+OPENAI_AVAILABLE = False
 try:
     from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
-    OPENAI_AVAILABLE = bool(os.getenv("OPENAI_API_KEY"))
-except Exception:
-    OPENAI_AVAILABLE = False
+except (ImportError, OSError) as e:
+    logger.warning("ai.openai_unavailable", extra={"error": str(e), "error_type": type(e).__name__})
+else:
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        OPENAI_AVAILABLE = bool(os.getenv("OPENAI_API_KEY"))
+    except Exception:
+        # SDK-specific init errors (e.g. missing credentials): the service
+        # runs in degraded mode without LLM features.
+        logger.exception("ai.openai_client_init_failed")
 
 PERSONAS = {
     "hr": "You are an HR AI expert specializing in workforce management, employee relations, and HR operations.",
@@ -34,8 +45,10 @@ def _query_llm(system_prompt: str, user_message: str, max_tokens: int = 500) -> 
                 temperature=0.7,
             )
             return resp.choices[0].message.content or ""
+        except (TimeoutError, ConnectionError) as e:
+            logger.warning("ai.llm_query_failed", extra={"error": str(e), "error_type": type(e).__name__})
         except Exception:
-            pass
+            logger.exception("ai.llm_query_unexpected_error")
     return ""
 
 
@@ -50,7 +63,8 @@ def _generate_report(query: str, department: str = "", timeframe: str = "this_mo
     result = _query_llm("You are an HR analytics expert.", prompt, max_tokens=800)
     try:
         return json.loads(result)
-    except Exception:
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning("ai.report_parse_failed", extra={"error": str(e)})
         return {
             "title": f"Report: {query[:50]}",
             "summary": f"Analysis of {query} across {department or 'all departments'} for {timeframe}.",

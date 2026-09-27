@@ -135,7 +135,8 @@ class ChannelManager:
         for ws in self.ws_clients.get(channel, set()):
             try:
                 await ws.send_json(message)
-            except Exception:
+            except (WebSocketDisconnect, RuntimeError) as e:
+                logger.debug("ws.client_dead", extra={"channel": channel, "error": str(e)})
                 dead.add(ws)
         for ws in dead:
             self.ws_clients[channel].discard(ws)
@@ -338,7 +339,10 @@ def validate_internal_jwt(auth_header: str) -> dict:
         return claims
     except HTTPException:
         raise
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token encoding: {type(e).__name__}")
     except Exception:
+        logger.exception("auth.validate_internal_jwt_unexpected_error")
         raise HTTPException(status_code=401, detail="Invalid internal authentication")
 
 
@@ -373,7 +377,11 @@ async def internal_auth_middleware(request: Request, call_next):
         request.state.tenant_id = claims.get("tenant_id", "default")
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        logger.warning("auth.unexpected_claims_shape", extra={"error": str(e), "error_type": type(e).__name__})
+        return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
     except Exception:
+        logger.exception("auth.middleware_unexpected_error")
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
@@ -412,10 +420,15 @@ async def rabbitmq_consumer():
                                 channel_name = message.routing_key.split(".")[0]
                                 await manager.broadcast_sse(channel_name, message.routing_key, payload)
                                 await manager.broadcast_ws(channel_name, payload)
+                            except (json.JSONDecodeError, UnicodeDecodeError, KeyError, ValueError, AttributeError) as e:
+                                logger.warning("rabbitmq.poison_message_skipped",
+                                    extra={"error": str(e), "error_type": type(e).__name__, "routing_key": message.routing_key})
                             except Exception:
-                                pass
-        except Exception as e:
-            print(f"RabbitMQ connection error: {e}, retrying in 5s...")
+                                logger.exception("rabbitmq.message_handler_failed",
+                                    extra={"routing_key": message.routing_key})
+        except Exception:
+            logger.exception("rabbitmq.connection_error")
+            print("RabbitMQ connection error, retrying in 5s...")
             await asyncio.sleep(5)
 
 
@@ -442,10 +455,14 @@ async def notifications_consumer():
                                         extra={"email": email, "tenant_id": tenant_id})
                                     manager.presence.pop(email, None)
                                     manager.presence.pop(tenant_id + ":" + email, None)
+                            except (json.JSONDecodeError, UnicodeDecodeError, KeyError, ValueError, AttributeError) as e:
+                                logger.warning("rabbitmq.poison_message_skipped",
+                                    extra={"error": str(e), "error_type": type(e).__name__})
                             except Exception:
-                                pass
-        except Exception as e:
-            print(f"Notifications consumer connection error: {e}, retrying in 5s...")
+                                logger.exception("rabbitmq.notifications_handler_failed")
+        except Exception:
+            logger.exception("rabbitmq.notifications_connection_error")
+            print("Notifications consumer connection error, retrying in 5s...")
             await asyncio.sleep(5)
 
 
@@ -558,8 +575,13 @@ async def verify_ws_token(websocket: WebSocket, token: Optional[str] = None) -> 
         websocket.state.user_role = claims.get("user_role", "employee")
         websocket.state.tenant_id = claims.get("tenant_id", "default")
         return True
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        logger.warning("ws.token_unparseable", extra={"error": str(e), "error_type": type(e).__name__})
+        await websocket.close(code=4001, reason="Invalid token encoding")
+        return False
     except Exception:
-        await websocket.close(code=4001, reason="Invalid authentication")
+        logger.exception("ws.token_unexpected_error")
+        await websocket.close(code=4001, reason="Internal authentication error")
         return False
 
 

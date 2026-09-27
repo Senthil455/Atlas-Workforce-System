@@ -43,7 +43,7 @@ def sanitize_url(url: str) -> str:
                 netloc = f"{parsed.username}:****@{netloc}"
             return urlunparse(parsed._replace(netloc=netloc))
         return url
-    except Exception:
+    except (ValueError, AttributeError, TypeError):
         return _URL_CREDENTIALS_RE.sub(r"://\1:****@", url)
 
 
@@ -92,5 +92,9 @@ def verify_internal_auth(request: Request, jwt_secret: str) -> dict:
         return claims
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid internal authentication")
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        # Malformed payload, bad base64, or non-dict claims: client sent a
+        # token we cannot parse.
+        raise HTTPException(status_code=401, detail=f"Invalid internal authentication: {type(e).__name__}")
+    # Anything else is a server-side bug: let it propagate so the global
+    # exception handler and alerting see it instead of masking it as a 401.

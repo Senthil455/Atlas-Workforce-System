@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker, Session
 from atlas_observability import (
     AtlasLoggingMiddleware, AtlasMetricsMiddleware, CorrelationIdMiddleware,
@@ -107,11 +108,15 @@ async def internal_auth_middleware(request: Request, call_next):
                 if "tenant_id" in params:
                     params["tenant_id"] = [request.state.tenant_id]
                     request.scope["query_string"] = urlencode(params, doseq=True).encode()
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError, UnicodeError) as e:
+            logger.warning("auth.tenant_scope_rewrite_failed", extra={"error": str(e)})
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        logger.warning("auth.unexpected_claims_shape", extra={"error": str(e), "error_type": type(e).__name__})
+        return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
     except Exception:
+        logger.exception("auth.middleware_unexpected_error")
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
@@ -174,7 +179,7 @@ def health_check():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             db_status = "connected"
-    except Exception:
+    except (SQLAlchemyError, OSError):
         db_status = "disconnected"
     return {"status": "Employee Lifecycle Service is running", "database": db_status}
 
