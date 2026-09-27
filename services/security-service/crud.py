@@ -56,6 +56,42 @@ from models import (
 
 PAGE_SIZE = 50
 
+
+class MassAssignmentError(ValueError):
+    pass
+
+
+def apply_updates(obj, data: dict, allowed_fields: set):
+    unknown = [k for k in data.keys() if k not in allowed_fields]
+    if unknown:
+        raise MassAssignmentError(f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
+    for key in allowed_fields:
+        if key in data:
+            setattr(obj, key, data[key])
+    return obj
+
+
+def filter_create_data(data: dict, allowed_fields: set) -> dict:
+    unknown = [k for k in data.keys() if k not in allowed_fields]
+    if unknown:
+        raise MassAssignmentError(f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
+    return {k: data[k] for k in allowed_fields if k in data}
+
+
+ZT_CREATE_FIELDS = frozenset({"tenant_id", "name", "description", "enabled", "priority", "conditions", "actions"})
+ZT_UPDATE_FIELDS = frozenset({"name", "description", "enabled", "priority", "conditions", "actions"})
+
+CA_CREATE_FIELDS = frozenset({"tenant_id", "name", "description", "enabled", "conditions", "grant_controls", "session_controls"})
+CA_UPDATE_FIELDS = frozenset({"name", "description", "enabled", "conditions", "grant_controls", "session_controls"})
+
+PRIVILEGED_ROLE_CREATE_FIELDS = frozenset({"tenant_id", "name", "description", "permissions", "risk_level", "requires_approval", "max_duration_minutes", "allowed_requester_roles"})
+DATA_CLASSIFICATION_CREATE_FIELDS = frozenset({"tenant_id", "resource_type", "resource_pattern", "classification_level", "category", "owner", "retention_days", "encryption_required", "masking_rules"})
+DLP_POLICY_CREATE_FIELDS = frozenset({"tenant_id", "name", "description", "enabled", "severity", "rules", "actions"})
+DLP_INCIDENT_CREATE_FIELDS = frozenset({"tenant_id", "policy_id", "user_id", "resource_type", "resource_id", "action", "data_classification", "description", "severity", "evidence"})
+ENCRYPTION_KEY_CREATE_FIELDS = frozenset({"tenant_id", "key_id", "algorithm", "purpose", "version"})
+DATA_RESIDENCY_CREATE_FIELDS = frozenset({"tenant_id", "region", "resource_type", "data_classification", "allowed_regions", "restricted_regions", "enforcement_mode", "enabled"})
+SESSION_RECORDING_CREATE_FIELDS = frozenset({"tenant_id", "user_id", "session_id", "user_role", "recording_type", "events", "ip_address", "user_agent"})
+
 def _paginate(query, page, page_size):
     total = query.count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
@@ -82,7 +118,7 @@ def get_zt_policy(db: Session, policy_id: uuid.UUID):
     return db.query(ZeroTrustPolicy).filter(ZeroTrustPolicy.id == policy_id).first()
 
 def create_zt_policy(db: Session, data: dict):
-    policy = ZeroTrustPolicy(**data)
+    policy = ZeroTrustPolicy(**filter_create_data(data, ZT_CREATE_FIELDS))
     db.add(policy)
     db.commit()
     db.refresh(policy)
@@ -92,8 +128,7 @@ def update_zt_policy(db: Session, policy_id: uuid.UUID, data: dict):
     policy = db.query(ZeroTrustPolicy).filter(ZeroTrustPolicy.id == policy_id).first()
     if not policy:
         return None
-    for k, v in data.items():
-        setattr(policy, k, v)
+    apply_updates(policy, data, ZT_UPDATE_FIELDS)
     policy.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(policy)
@@ -148,7 +183,7 @@ def get_ca_policy(db: Session, policy_id: uuid.UUID):
     return db.query(ConditionalAccessPolicy).filter(ConditionalAccessPolicy.id == policy_id).first()
 
 def create_ca_policy(db: Session, data: dict):
-    policy = ConditionalAccessPolicy(**data)
+    policy = ConditionalAccessPolicy(**filter_create_data(data, CA_CREATE_FIELDS))
     db.add(policy)
     db.commit()
     db.refresh(policy)
@@ -158,8 +193,7 @@ def update_ca_policy(db: Session, policy_id: uuid.UUID, data: dict):
     policy = db.query(ConditionalAccessPolicy).filter(ConditionalAccessPolicy.id == policy_id).first()
     if not policy:
         return None
-    for k, v in data.items():
-        setattr(policy, k, v)
+    apply_updates(policy, data, CA_UPDATE_FIELDS)
     policy.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(policy)
@@ -316,7 +350,7 @@ def list_privileged_roles(db: Session, tenant_id: str = None):
     return q.order_by(PrivilegedRole.name).all()
 
 def create_privileged_role(db: Session, data: dict):
-    role = PrivilegedRole(**data)
+    role = PrivilegedRole(**filter_create_data(data, PRIVILEGED_ROLE_CREATE_FIELDS))
     db.add(role)
     db.commit()
     db.refresh(role)
@@ -386,7 +420,7 @@ def list_data_classifications(db: Session, tenant_id: str = None, classification
     return q.order_by(DataClassification.resource_type).all()
 
 def create_data_classification(db: Session, data: dict):
-    dc = DataClassification(**data)
+    dc = DataClassification(**filter_create_data(data, DATA_CLASSIFICATION_CREATE_FIELDS))
     db.add(dc)
     db.commit()
     db.refresh(dc)
@@ -417,7 +451,7 @@ def list_dlp_policies(db: Session, tenant_id: str = None, enabled: bool = None):
     return q.order_by(DLPPolicy.created_at.desc()).all()
 
 def create_dlp_policy(db: Session, data: dict):
-    policy = DLPPolicy(**data)
+    policy = DLPPolicy(**filter_create_data(data, DLP_POLICY_CREATE_FIELDS))
     db.add(policy)
     db.commit()
     db.refresh(policy)
@@ -438,7 +472,7 @@ def list_dlp_incidents(db: Session, tenant_id: str = None, status: str = None, s
     return _paginate(q, page, page_size)
 
 def report_dlp_incident(db: Session, data: dict):
-    incident = DLPIncident(**data)
+    incident = DLPIncident(**filter_create_data(data, DLP_INCIDENT_CREATE_FIELDS))
     db.add(incident)
     db.commit()
     db.refresh(incident)
@@ -466,7 +500,7 @@ def list_encryption_keys(db: Session, tenant_id: str = None, status: str = None)
     return q.order_by(desc(EncryptionKey.version)).all()
 
 def create_encryption_key(db: Session, data: dict):
-    key = EncryptionKey(**data)
+    key = EncryptionKey(**filter_create_data(data, ENCRYPTION_KEY_CREATE_FIELDS))
     db.add(key)
     db.commit()
     db.refresh(key)
@@ -532,7 +566,7 @@ def create_data_residency(db: Session, data: dict):
     for region in data.get("allowed_regions", []) + data.get("restricted_regions", []) + [data.get("region", "")]:
         if region and not validate_country_code(region):
             raise ValueError(f"Invalid country code: {region}")
-    policy = DataResidencyPolicy(**data)
+    policy = DataResidencyPolicy(**filter_create_data(data, DATA_RESIDENCY_CREATE_FIELDS))
     db.add(policy)
     db.commit()
     db.refresh(policy)
@@ -565,15 +599,16 @@ def check_data_residency(policy: DataResidencyPolicy, target_region: str) -> dic
 # ── Session Recording ───────────────────────────────────────────────────────
 
 def start_session_recording(db: Session, data: dict):
+    filtered = filter_create_data(data, SESSION_RECORDING_CREATE_FIELDS)
     recording = SessionRecording(
-        tenant_id=data["tenant_id"],
-        user_id=data["user_id"],
-        session_id=data.get("session_id"),
-        user_role=data.get("user_role"),
-        recording_type=data.get("recording_type", "keystroke"),
-        events=data.get("events", []),
-        ip_address=data.get("ip_address"),
-        user_agent=data.get("user_agent"),
+        tenant_id=filtered["tenant_id"],
+        user_id=filtered["user_id"],
+        session_id=filtered.get("session_id"),
+        user_role=filtered.get("user_role"),
+        recording_type=filtered.get("recording_type", "keystroke"),
+        events=filtered.get("events", []),
+        ip_address=filtered.get("ip_address"),
+        user_agent=filtered.get("user_agent"),
         status="recording",
         started_at=datetime.now(timezone.utc),
     )
