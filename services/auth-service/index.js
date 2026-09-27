@@ -2854,8 +2854,17 @@ app.get('/metrics', async (req, res) => {
   res.end(await promClient.register.metrics());
 });
 
-app.listen(PORT, () => {
-  console.log(`Auth service running on port ${PORT}`);
-});
+module.exports = {
+  app,
+  requireRole,
+  pool,
+  validatePassword,
+  hashToken,
+  sanitizeUser,
+};
 
-module.exports = { app, requireRole, pool };
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Auth service running on port ${PORT}`);
+  });
+}
