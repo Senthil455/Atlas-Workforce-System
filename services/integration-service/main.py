@@ -69,7 +69,6 @@ configure_logging("integration-service", level=logging.INFO)
 logger = get_logger("integration-service")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://atlas_user:atlas_password@postgres:5432/atlas_db")
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "svc-integration-key-change-in-production")
 INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000")
 MAX_PAGE_SIZE = 100
@@ -88,10 +87,8 @@ def get_db() -> Session:
 
 
 
-async def verify_internal_key(x_internal_key: str = Header(...)):
-    if x_internal_key != INTERNAL_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid internal API key")
-    return True
+# verify_internal_key removed - all endpoints now require x-internal-auth JWT
+# (same as employee-python-service); tenant is bound from verified claims.
 
 
 @asynccontextmanager
@@ -367,7 +364,6 @@ async def list_integration_outbox(
 async def publish_internal_event(
     payload: EventPublishRequest,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_internal_key),
 ):
     route_event(payload.event_type, payload.tenant_id, payload.payload, payload.source_service)
     return {"message": "Event accepted for routing", "event_type": payload.event_type, "tenant_id": payload.tenant_id}

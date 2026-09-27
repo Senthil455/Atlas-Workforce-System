@@ -46,6 +46,31 @@ const auditRetryDlqDepth = new promClient.Gauge({
   help: 'Depth of audit retry DLQ',
 });
 
+const auditDeliveryFailuresTotal = new promClient.Counter({
+  name: 'atlas_audit_delivery_failures_total',
+  help: 'Total audit log delivery failures from api-gateway',
+  labelNames: ['event_type'],
+});
+
+const AUDIT_WRITER_AUDIENCE = 'audit-writer';
+
+function mintAuditWriterToken() {
+  return jwt.sign(
+    {
+      sub: 'api-gateway',
+      service: 'api-gateway',
+      tenant_id: 'default',
+      aud: AUDIT_WRITER_AUDIENCE,
+    },
+    INTERNAL_JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '60s' }
+  );
+}
+
+function auditWriterHeaders() {
+  return { 'x-internal-auth': mintAuditWriterToken() };
+}
+
 promClient.collectDefaultMetrics();
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://redis:6379';
@@ -133,18 +158,12 @@ const PORT = process.env.PORT || 8080;
 const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET;
-const AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY;
 const AUDIT_SERVICE_URL = process.env.AUDIT_COMPLIANCE_SERVICE_URL || 'http://audit-compliance-service:8011';
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 const SLACK_WEBHOOK_SECRET = process.env.SLACK_WEBHOOK_SECRET || '';
 
 if (!INTERNAL_JWT_SECRET) {
   console.error('FATAL: INTERNAL_JWT_SECRET is required');
-  process.exit(1);
-}
-
-if (!AUDIT_INTERNAL_KEY) {
-  console.error('FATAL: AUDIT_INTERNAL_KEY is required');
   process.exit(1);
 }
 
@@ -463,12 +482,13 @@ function auditProxyMiddleware(req, res, next) {
     };
 
     axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, auditPayload, {
-      headers: { 'X-Internal-Key': AUDIT_INTERNAL_KEY },
+      headers: auditWriterHeaders(),
       timeout: 2000
     }).catch(err => {
       if (err.code !== 'ECONNREFUSED' && err.code !== 'ECONNABORTED') {
         console.error('Audit proxy error:', err.message);
       }
+      try { auditDeliveryFailuresTotal.labels({ event_type: auditPayload.event_type || 'gateway' }).inc(); } catch {}
       enqueueAuditRetry(auditPayload);
     });
   });
@@ -1161,7 +1181,7 @@ async function drainAuditRetryQueue() {
 
       try {
         await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, payload, {
-          headers: { 'X-Internal-Key': AUDIT_INTERNAL_KEY },
+          headers: auditWriterHeaders(),
           timeout: 2000,
         });
         await redisClient.lRem(AUDIT_RETRY_PROCESSING, 1, item);

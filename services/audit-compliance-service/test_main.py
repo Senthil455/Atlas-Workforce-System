@@ -1,6 +1,9 @@
+import base64
 import hashlib
+import hmac
 import json
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,11 +14,12 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+os.environ.setdefault("INTERNAL_JWT_SECRET", "test-secret")
+
 from crud import configure_hash_salt, _compute_hash
 from models import Base, AuditLog, CompliancePolicy, ComplianceViolation
 from main import (
     HASH_SALT,
-    INTERNAL_API_KEY,
     MAX_PAGE_SIZE,
     app,
     get_db,
@@ -58,12 +62,51 @@ def override_get_db(db_session: Session):
 def client(override_get_db):
     app.dependency_overrides[get_db] = override_get_db
     transport = ASGITransport(app=app)
-    client = AsyncClient(transport=transport, base_url="http://test")
+
+    async def _auto_auth(request):
+        # Reads and non-audit writes go through the global x-internal-auth
+        # middleware, so attach a tenant-matching writer token unless the test
+        # set one explicitly. Audit-write POSTs are left alone so the
+        # negative auth tests exercise the real checks.
+        if request.url.path == "/api/v1/audit/log" and request.method == "POST":
+            return
+        if "x-internal-auth" not in request.headers:
+            tenant = request.url.params.get("tenant_id", "default")
+            request.headers["x-internal-auth"] = _mint_audit_writer_token(tenant_id=tenant)
+
+    client = AsyncClient(
+        transport=transport, base_url="http://test", event_hooks={"request": [_auto_auth]}
+    )
     yield client
     app.dependency_overrides.clear()
 
 
-INTERNAL_HEADERS = {"X-Internal-Key": INTERNAL_API_KEY}
+INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "test-secret")
+
+
+def _mint_audit_writer_token(secret: str = None, audience="audit-writer", tenant_id: str = "default") -> str:
+    secret = secret if secret is not None else INTERNAL_JWT_SECRET
+    header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode()).rstrip(b"=").decode()
+    payload = {
+        "sub": "test-writer",
+        "service": "test-writer",
+        "tenant_id": tenant_id,
+        "aud": audience,
+        "exp": int(time.time()) + 3600,
+    }
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    signing_input = f"{header}.{payload_b64}"
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    return f"{signing_input}.{signature}"
+
+
+def _auth_headers(tenant: str = "default", audience: str = "audit-writer") -> dict:
+    return {"x-internal-auth": _mint_audit_writer_token(audience=audience, tenant_id=tenant)}
+
+
+INTERNAL_HEADERS = {"x-internal-auth": _mint_audit_writer_token()}
 TENANT_ID = "test-tenant-001"
 
 
@@ -122,10 +165,10 @@ async def test_create_audit_log(client: AsyncClient, db_session: Session):
 
 
 @pytest.mark.asyncio
-async def test_create_audit_log_requires_internal_key(client: AsyncClient):
+async def test_create_audit_log_requires_internal_auth(client: AsyncClient):
     payload = _create_audit_payload()
     resp = await client.post("/api/v1/audit/log", json=payload)
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -134,9 +177,52 @@ async def test_create_audit_log_with_wrong_key(client: AsyncClient):
     resp = await client.post(
         "/api/v1/audit/log",
         json=payload,
-        headers={"X-Internal-Key": "wrong-key"},
+        headers={"x-internal-auth": _mint_audit_writer_token(secret="wrong-secret")},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_create_audit_log_requires_writer_audience(client: AsyncClient):
+    payload = _create_audit_payload()
+    resp = await client.post(
+        "/api/v1/audit/log",
+        json=payload,
+        headers={"x-internal-auth": _mint_audit_writer_token(audience="someone-else")},
     )
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_create_audit_log_accepts_service_shape(client: AsyncClient, db_session: Session):
+    tenant = "test-service-shape"
+    db_session.query(AuditLog).filter(AuditLog.tenant_id == tenant).delete()
+    db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/audit/log",
+        json={
+            "event_type": "auth.login",
+            "user_id": 42,
+            "email": "user@test.com",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "details": {"session_id": "sess-1"},
+            "service": "auth-service",
+        },
+        headers={"x-internal-auth": _mint_audit_writer_token(tenant_id=tenant)},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["tenant_id"] == tenant
+    assert data["actor_id"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_create_audit_log_rejects_missing_event_type(client: AsyncClient):
+    resp = await client.post(
+        "/api/v1/audit/log", json={"user_id": 1}, headers=INTERNAL_HEADERS
+    )
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
