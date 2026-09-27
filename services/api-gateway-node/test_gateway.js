@@ -1,11 +1,19 @@
+// Dummy secrets so the gateway module can be required without real env.
+// CI also sets these, but unit tests should work with plain `npm test`.
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'unit-test-jwt-secret-value';
+process.env.INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET || 'unit-test-internal-secret-value';
+process.env.AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY || 'unit-test-audit-key';
+
 const http = require('http');
 const assert = require('assert');
-const { app, csrfMiddleware, rbacMiddleware, services, isPublicOrAuthPath } = require('./index');
+const { csrfMiddleware, rbacMiddleware, services, isPublicOrAuthPath } = require('./index');
 
-// Health check test - fails when gateway is unreachable
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
+
+// Health check test - fails when the gateway is unreachable (no skipping).
 function testHealthEndpoint() {
   return new Promise((resolve, reject) => {
-    http.get('http://localhost:8080/health', (res) => {
+    http.get(GATEWAY_URL + '/health', (res) => {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
@@ -20,7 +28,7 @@ function testHealthEndpoint() {
         }
       });
     }).on('error', (err) => {
-      reject(new Error('Gateway not reachable: ' + err.message));
+      reject(new Error('Gateway not reachable at ' + GATEWAY_URL + ': ' + err.message));
     });
   });
 }
@@ -182,19 +190,30 @@ function testPublicPathDetection() {
 }
 
 async function run() {
-  // Run unit tests that don't need a live server
+  // Unit tests run without a live server.
   testCsrfMiddleware();
   testRbacMiddleware();
   testProxyRewriteTable();
   testPublicPathDetection();
 
-  // Run integration test that needs a live server
+  // Integration test needs the gateway running (CI starts it, see ci.yml).
   await testHealthEndpoint();
 
   console.log('All gateway tests passed.');
 }
 
-run().catch((e) => {
-  console.error('Test failed:', e.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().then(() => process.exit(0)).catch((e) => {
+    console.error('Test failed:', e.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  testCsrfMiddleware,
+  testRbacMiddleware,
+  testProxyRewriteTable,
+  testPublicPathDetection,
+  testHealthEndpoint,
+  run,
+};
