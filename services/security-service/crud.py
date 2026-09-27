@@ -56,6 +56,11 @@ from models import (
 
 PAGE_SIZE = 50
 
+def _require_tenant(tenant_id) -> str:
+    if not tenant_id or not str(tenant_id).strip():
+        raise ValueError("tenant_id is required")
+    return str(tenant_id).strip()
+
 def _paginate(query, page, page_size):
     total = query.count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
@@ -69,10 +74,9 @@ def _paginate(query, page, page_size):
 
 # ── Zero Trust Policies ─────────────────────────────────────────────────────
 
-def list_zt_policies(db: Session, tenant_id: str = None, enabled: bool = None, page: int = 1, page_size: int = PAGE_SIZE):
-    q = db.query(ZeroTrustPolicy)
-    if tenant_id:
-        q = q.filter(ZeroTrustPolicy.tenant_id == tenant_id)
+def list_zt_policies(db: Session, tenant_id: str, enabled: bool = None, page: int = 1, page_size: int = PAGE_SIZE):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(ZeroTrustPolicy).filter(ZeroTrustPolicy.tenant_id == tenant_id)
     if enabled is not None:
         q = q.filter(ZeroTrustPolicy.enabled == enabled)
     q = q.order_by(ZeroTrustPolicy.priority.asc())
@@ -135,10 +139,9 @@ def evaluate_zt_policy(policy: ZeroTrustPolicy, context: dict) -> dict:
 
 # ── Conditional Access ──────────────────────────────────────────────────────
 
-def list_ca_policies(db: Session, tenant_id: str = None, enabled: bool = None, page: int = 1, page_size: int = PAGE_SIZE):
-    q = db.query(ConditionalAccessPolicy)
-    if tenant_id:
-        q = q.filter(ConditionalAccessPolicy.tenant_id == tenant_id)
+def list_ca_policies(db: Session, tenant_id: str, enabled: bool = None, page: int = 1, page_size: int = PAGE_SIZE):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(ConditionalAccessPolicy).filter(ConditionalAccessPolicy.tenant_id == tenant_id)
     if enabled is not None:
         q = q.filter(ConditionalAccessPolicy.enabled == enabled)
     q = q.order_by(ConditionalAccessPolicy.created_at.desc())
@@ -298,10 +301,9 @@ def assess_risk(db: Session, data: dict) -> dict:
         "assessed_at": assessment.assessed_at.isoformat(),
     }
 
-def list_risk_assessments(db: Session, tenant_id: str = None, user_id: str = None, page: int = 1, page_size: int = PAGE_SIZE):
-    q = db.query(RiskAssessment)
-    if tenant_id:
-        q = q.filter(RiskAssessment.tenant_id == tenant_id)
+def list_risk_assessments(db: Session, tenant_id: str, user_id: str = None, page: int = 1, page_size: int = PAGE_SIZE):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(RiskAssessment).filter(RiskAssessment.tenant_id == tenant_id)
     if user_id:
         q = q.filter(RiskAssessment.user_id == user_id)
     q = q.order_by(desc(RiskAssessment.assessed_at))
@@ -309,10 +311,9 @@ def list_risk_assessments(db: Session, tenant_id: str = None, user_id: str = Non
 
 # ── Privileged Access Management ────────────────────────────────────────────
 
-def list_privileged_roles(db: Session, tenant_id: str = None):
-    q = db.query(PrivilegedRole)
-    if tenant_id:
-        q = q.filter(PrivilegedRole.tenant_id == tenant_id)
+def list_privileged_roles(db: Session, tenant_id: str):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(PrivilegedRole).filter(PrivilegedRole.tenant_id == tenant_id)
     return q.order_by(PrivilegedRole.name).all()
 
 def create_privileged_role(db: Session, data: dict):
@@ -343,10 +344,9 @@ def request_privileged_access(db: Session, data: dict):
     db.refresh(grant)
     return grant
 
-def list_privileged_access(db: Session, tenant_id: str = None, user_id: str = None, status: str = None, page: int = 1, page_size: int = PAGE_SIZE):
-    q = db.query(PrivilegedAccess).join(PrivilegedRole, PrivilegedAccess.role_id == PrivilegedRole.id, isouter=True)
-    if tenant_id:
-        q = q.filter(PrivilegedAccess.tenant_id == tenant_id)
+def list_privileged_access(db: Session, tenant_id: str, user_id: str = None, status: str = None, page: int = 1, page_size: int = PAGE_SIZE):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(PrivilegedAccess).join(PrivilegedRole, PrivilegedAccess.role_id == PrivilegedRole.id, isouter=True).filter(PrivilegedAccess.tenant_id == tenant_id)
     if user_id:
         q = q.filter(PrivilegedAccess.user_id == user_id)
     if status:
@@ -377,10 +377,9 @@ def revoke_privileged_access(db: Session, grant_id: uuid.UUID):
 
 # ── Data Classification ─────────────────────────────────────────────────────
 
-def list_data_classifications(db: Session, tenant_id: str = None, classification_level: str = None):
-    q = db.query(DataClassification)
-    if tenant_id:
-        q = q.filter(DataClassification.tenant_id == tenant_id)
+def list_data_classifications(db: Session, tenant_id: str, classification_level: str = None):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(DataClassification).filter(DataClassification.tenant_id == tenant_id)
     if classification_level:
         q = q.filter(DataClassification.classification_level == classification_level)
     return q.order_by(DataClassification.resource_type).all()
@@ -408,10 +407,9 @@ def classify_resource(classification: DataClassification, resource_data: dict) -
 
 # ── DLP ─────────────────────────────────────────────────────────────────────
 
-def list_dlp_policies(db: Session, tenant_id: str = None, enabled: bool = None):
-    q = db.query(DLPPolicy)
-    if tenant_id:
-        q = q.filter(DLPPolicy.tenant_id == tenant_id)
+def list_dlp_policies(db: Session, tenant_id: str, enabled: bool = None):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(DLPPolicy).filter(DLPPolicy.tenant_id == tenant_id)
     if enabled is not None:
         q = q.filter(DLPPolicy.enabled == enabled)
     return q.order_by(DLPPolicy.created_at.desc()).all()
@@ -426,10 +424,9 @@ def create_dlp_policy(db: Session, data: dict):
 def get_dlp_policy(db: Session, policy_id: uuid.UUID):
     return db.query(DLPPolicy).filter(DLPPolicy.id == policy_id).first()
 
-def list_dlp_incidents(db: Session, tenant_id: str = None, status: str = None, severity: str = None, page: int = 1, page_size: int = PAGE_SIZE):
-    q = db.query(DLPIncident)
-    if tenant_id:
-        q = q.filter(DLPIncident.tenant_id == tenant_id)
+def list_dlp_incidents(db: Session, tenant_id: str, status: str = None, severity: str = None, page: int = 1, page_size: int = PAGE_SIZE):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(DLPIncident).filter(DLPIncident.tenant_id == tenant_id)
     if status:
         q = q.filter(DLPIncident.status == status)
     if severity:
@@ -457,10 +454,9 @@ def update_dlp_incident(db: Session, incident_id: uuid.UUID, status: str):
 
 # ── Encryption Key Rotation ─────────────────────────────────────────────────
 
-def list_encryption_keys(db: Session, tenant_id: str = None, status: str = None):
-    q = db.query(EncryptionKey)
-    if tenant_id:
-        q = q.filter(EncryptionKey.tenant_id == tenant_id)
+def list_encryption_keys(db: Session, tenant_id: str, status: str = None):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(EncryptionKey).filter(EncryptionKey.tenant_id == tenant_id)
     if status:
         q = q.filter(EncryptionKey.status == status)
     return q.order_by(desc(EncryptionKey.version)).all()
@@ -522,10 +518,9 @@ def validate_country_code(country: str) -> bool:
 
 # ── Data Residency ──────────────────────────────────────────────────────────
 
-def list_data_residency_policies(db: Session, tenant_id: str = None):
-    q = db.query(DataResidencyPolicy)
-    if tenant_id:
-        q = q.filter(DataResidencyPolicy.tenant_id == tenant_id)
+def list_data_residency_policies(db: Session, tenant_id: str):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(DataResidencyPolicy).filter(DataResidencyPolicy.tenant_id == tenant_id)
     return q.order_by(DataResidencyPolicy.region).all()
 
 def create_data_residency(db: Session, data: dict):
@@ -605,10 +600,9 @@ def add_session_event(db: Session, recording_id: uuid.UUID, event: dict):
     db.refresh(recording)
     return recording
 
-def list_session_recordings(db: Session, tenant_id: str = None, user_id: str = None, status: str = None, page: int = 1, page_size: int = PAGE_SIZE):
-    q = db.query(SessionRecording)
-    if tenant_id:
-        q = q.filter(SessionRecording.tenant_id == tenant_id)
+def list_session_recordings(db: Session, tenant_id: str, user_id: str = None, status: str = None, page: int = 1, page_size: int = PAGE_SIZE):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(SessionRecording).filter(SessionRecording.tenant_id == tenant_id)
     if user_id:
         q = q.filter(SessionRecording.user_id == user_id)
     if status:

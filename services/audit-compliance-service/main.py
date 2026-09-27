@@ -42,7 +42,7 @@ from crud import (
     update_policy,
     update_violation_status,
 )
-from models import Base
+from models import AuditLog, Base
 from schemas import (
     AuditLogCreate,
     AuditLogPaginated,
@@ -165,16 +165,33 @@ async def internal_auth_middleware(request: Request, call_next):
 
     try:
         claims = verify_internal_auth(request, INTERNAL_JWT_SECRET)
-        request.state.tenant_id = claims.get("tenant_id", "default")
+        verified_tenant = str(claims.get("tenant_id", "default")).strip()
+        if not verified_tenant:
+            return JSONResponse(status_code=403, content={"error": "Missing tenant context"})
+        request.state.tenant_id = verified_tenant
         request.state.user_id = claims.get("user_id", "")
         request.state.user_role = claims.get("user_role", "employee")
-        # Enforce tenant isolation
-        header_tenant = request.headers.get("x-tenant-id") or request.headers.get("X-Tenant-Id")
-        if header_tenant and header_tenant != request.state.tenant_id:
-            return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
-        query_tenant = request.query_params.get("tenant_id")
-        if query_tenant and query_tenant != request.state.tenant_id:
-            return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
+        # Reject an explicitly empty tenant header or query value. An empty
+        # string is falsy in Python, so without this check it would silently
+        # disable the tenant filter downstream.
+        if "x-tenant-id" in request.headers:
+            header_tenant = request.headers.get("x-tenant-id")
+            if header_tenant is not None and not str(header_tenant).strip():
+                return JSONResponse(status_code=400, content={"error": "Empty tenant header"})
+            if header_tenant and header_tenant != request.state.tenant_id:
+                return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
+        else:
+            header_tenant = request.headers.get("X-Tenant-Id")
+            if header_tenant is not None and not str(header_tenant).strip():
+                return JSONResponse(status_code=400, content={"error": "Empty tenant header"})
+            if header_tenant and header_tenant != request.state.tenant_id:
+                return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
+        if "tenant_id" in request.query_params:
+            query_tenant = request.query_params.get("tenant_id")
+            if query_tenant is not None and not str(query_tenant).strip():
+                return JSONResponse(status_code=400, content={"error": "Empty tenant_id"})
+            if query_tenant and query_tenant != request.state.tenant_id:
+                return JSONResponse(status_code=403, content={"error": "Tenant mismatch"})
         # Overwrite tenant header/query with verified claim so downstream code cannot use spoofed value
         try:
             headers = list(request.scope.get("headers", []))
@@ -213,6 +230,21 @@ async def verify_internal_key(x_internal_key: str = Header(...)):
 
 async def clamp_page_size(page_size: int = Query(50, ge=1, le=MAX_PAGE_SIZE)) -> int:
     return min(page_size, MAX_PAGE_SIZE)
+
+
+def get_tenant(request: Request) -> str:
+    tenant = getattr(request.state, "tenant_id", None)
+    if not tenant or not str(tenant).strip():
+        raise HTTPException(status_code=403, detail="Missing tenant context")
+    return str(tenant).strip()
+
+
+def resolve_tenant(query_tenant: Optional[str], verified_tenant: str) -> str:
+    if query_tenant is not None and not str(query_tenant).strip():
+        raise HTTPException(status_code=400, detail="Empty tenant_id")
+    if query_tenant is not None and str(query_tenant) != verified_tenant:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    return verified_tenant
 
 
 # ── Health ──────────────────────────────────────────────────────────────────
@@ -255,6 +287,7 @@ async def create_audit_entry(
     "actor, resource, action, and date range.",
 )
 async def list_audit_entries(
+    request: Request,
     tenant_id: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     actor_id: Optional[str] = Query(None),
@@ -264,11 +297,12 @@ async def list_audit_entries(
     end_date: Optional[datetime] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Depends(clamp_page_size),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
     return list_audit_logs(
         db,
-        tenant_id=tenant_id,
+        tenant_id=resolve_tenant(tenant_id, verified_tenant),
         event_type=event_type,
         actor_id=actor_id,
         resource_type=resource_type,
@@ -286,9 +320,11 @@ async def list_audit_entries(
     tags=["Audit Logs"],
     summary="Get audit log entry",
 )
-async def get_audit_entry(log_id: UUID, db: Session = Depends(get_db)):
+async def get_audit_entry(log_id: UUID, request: Request, verified_tenant: str = Depends(get_tenant), db: Session = Depends(get_db)):
     log = get_audit_log(db, log_id)
     if not log:
+        raise HTTPException(status_code=404, detail="Audit log entry not found")
+    if log.tenant_id != verified_tenant:
         raise HTTPException(status_code=404, detail="Audit log entry not found")
     return log
 
@@ -301,6 +337,7 @@ async def get_audit_entry(log_id: UUID, db: Session = Depends(get_db)):
     "Set `format` query parameter to 'csv' for CSV export.",
 )
 async def export_audit_entries(
+    request: Request,
     format: str = Query("json", pattern="^(json|csv)$"),
     tenant_id: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
@@ -308,12 +345,14 @@ async def export_audit_entries(
     resource_type: Optional[str] = Query(None),
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
+    effective_tenant = resolve_tenant(tenant_id, verified_tenant)
     if format == "csv":
         csv_data = export_audit_logs_csv(
             db,
-            tenant_id=tenant_id,
+            tenant_id=effective_tenant,
             event_type=event_type,
             actor_id=actor_id,
             resource_type=resource_type,
@@ -328,7 +367,7 @@ async def export_audit_entries(
     else:
         json_data = export_audit_logs_json(
             db,
-            tenant_id=tenant_id,
+            tenant_id=effective_tenant,
             event_type=event_type,
             actor_id=actor_id,
             resource_type=resource_type,
@@ -350,16 +389,18 @@ async def export_audit_entries(
     summary="List compliance policies",
 )
 async def list_compliance_policies(
+    request: Request,
     tenant_id: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     enabled: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Depends(clamp_page_size),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
     return list_policies(
         db,
-        tenant_id=tenant_id,
+        tenant_id=resolve_tenant(tenant_id, verified_tenant),
         category=category,
         enabled=enabled,
         page=page,
@@ -420,6 +461,7 @@ async def delete_compliance_policy(
     summary="List compliance violations",
 )
 async def list_compliance_violations(
+    request: Request,
     tenant_id: Optional[str] = Query(None),
     policy_id: Optional[UUID] = Query(None),
     employee_id: Optional[str] = Query(None),
@@ -429,11 +471,12 @@ async def list_compliance_violations(
     end_date: Optional[datetime] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Depends(clamp_page_size),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
     return list_violations(
         db,
-        tenant_id=tenant_id,
+        tenant_id=resolve_tenant(tenant_id, verified_tenant),
         policy_id=policy_id,
         employee_id=employee_id,
         severity=severity,
@@ -484,9 +527,12 @@ async def update_violation_status_endpoint(
     summary="Compliance dashboard summary",
 )
 async def compliance_summary(
-    tenant_id: str = Query(...), db: Session = Depends(get_db)
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
+    db: Session = Depends(get_db),
 ):
-    return get_compliance_summary(db, tenant_id)
+    return get_compliance_summary(db, resolve_tenant(tenant_id, verified_tenant))
 
 
 @app.post(
@@ -497,9 +543,12 @@ async def compliance_summary(
     "and generates violations for any rule breaches.",
 )
 async def compliance_scan(
-    tenant_id: str = Query(...), db: Session = Depends(get_db)
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
+    db: Session = Depends(get_db),
 ):
-    violations = trigger_compliance_scan(db, tenant_id)
+    violations = trigger_compliance_scan(db, resolve_tenant(tenant_id, verified_tenant))
     return {
         "message": f"Scan completed. {len(violations)} violations detected.",
         "violations_count": len(violations),
@@ -515,7 +564,9 @@ async def compliance_scan(
 )
 async def compliance_report(
     report_type: str,
-    tenant_id: str = Query(...),
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
     valid_types = {"SOC2", "GDPR", "ISO27001"}
@@ -524,7 +575,7 @@ async def compliance_report(
             status_code=400,
             detail=f"Invalid report type. Must be one of: {', '.join(valid_types)}",
         )
-    return generate_compliance_report(db, tenant_id, report_type)
+    return generate_compliance_report(db, resolve_tenant(tenant_id, verified_tenant), report_type)
 
 
 # ── Data Retention ──────────────────────────────────────────────────────────
@@ -535,10 +586,12 @@ async def compliance_report(
     summary="List data retention policies",
 )
 async def list_retention_policies_endpoint(
+    request: Request,
     tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
-    return list_retention_policies(db, tenant_id)
+    return list_retention_policies(db, resolve_tenant(tenant_id, verified_tenant))
 
 
 @app.post(
@@ -562,10 +615,12 @@ async def create_retention_policy_endpoint(
 )
 async def get_employee_consents(
     employee_id: str,
+    request: Request,
     tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
-    consents = get_consents(db, employee_id, tenant_id)
+    consents = get_consents(db, employee_id, resolve_tenant(tenant_id, verified_tenant))
     return consents
 
 
@@ -592,10 +647,12 @@ async def record_employee_consent(
 )
 async def right_to_be_forgotten_endpoint(
     employee_id: str,
+    request: Request,
     tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
-    return right_to_be_forgotten(db, employee_id, tenant_id)
+    return right_to_be_forgotten(db, employee_id, resolve_tenant(tenant_id, verified_tenant))
 
 
 @app.get(
@@ -608,10 +665,12 @@ async def right_to_be_forgotten_endpoint(
 )
 async def data_portability_endpoint(
     employee_id: str,
+    request: Request,
     tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
-    return data_portability(db, employee_id, tenant_id)
+    return data_portability(db, employee_id, resolve_tenant(tenant_id, verified_tenant))
 
 
 # ── Verify Chain Integrity ──────────────────────────────────────────────────
@@ -624,14 +683,17 @@ async def data_portability_endpoint(
     "Returns whether the chain is intact and details of any break.",
 )
 async def verify_chain_integrity(
-    tenant_id: str = Query(...),
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    verified_tenant: str = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
+    effective_tenant = resolve_tenant(tenant_id, verified_tenant)
     from crud import _compute_hash
 
     entries = (
         db.query(AuditLog)
-        .filter(AuditLog.tenant_id == tenant_id)
+        .filter(AuditLog.tenant_id == effective_tenant)
         .order_by(AuditLog.created_at.asc())
         .all()
     )
@@ -667,7 +729,7 @@ async def verify_chain_integrity(
             })
 
     return {
-        "tenant_id": tenant_id,
+        "tenant_id": effective_tenant,
         "total_entries": len(entries),
         "chain_intact": len(issues) == 0,
         "issues": issues,
