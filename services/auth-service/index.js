@@ -98,6 +98,79 @@ const SAML_IDP_SSO_URL = process.env.SAML_IDP_SSO_URL || 'https://idp.example.co
 const SAML_IDP_ENTITY_ID = process.env.SAML_IDP_ENTITY_ID || 'https://idp.example.com/metadata';
 const SAML_IDP_CERT = (process.env.SAML_IDP_CERT || '').replace(/\\n/g, '\n');
 const SCIM_API_KEY = process.env.SCIM_API_KEY;
+const SCIM_ALLOWED_ROLES = ['employee'];
+
+function parseScimApiKeys() {
+  const raw = process.env.SCIM_API_KEYS || '';
+  const map = new Map();
+  if (!raw || !raw.trim()) return map;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const obj = JSON.parse(trimmed);
+      for (const [tenant, key] of Object.entries(obj)) {
+        if (typeof tenant === 'string' && typeof key === 'string' && tenant.trim() && key) {
+          map.set(tenant.trim(), key);
+        }
+      }
+      return map;
+    } catch {
+      // Fall through to comma-separated parsing
+    }
+  }
+  for (const entry of trimmed.split(',')) {
+    const part = entry.trim();
+    if (!part) continue;
+    const sepIdx = part.search(/[:=]/);
+    if (sepIdx === -1) continue;
+    const tenant = part.slice(0, sepIdx).trim();
+    const key = part.slice(sepIdx + 1).trim();
+    if (tenant && key) map.set(tenant, key);
+  }
+  return map;
+}
+
+const SCIM_TENANT_KEYS = parseScimApiKeys();
+
+if (SCIM_TENANT_KEYS.size === 0) {
+  console.warn('WARNING: SCIM_API_KEYS is not set; legacy SCIM_API_KEY is scoped to the default tenant only. Set SCIM_API_KEYS to provision other tenants.');
+}
+
+function scimTimingSafeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  try {
+    return crypto.timingSafeEqual(ab, bb);
+  } catch {
+    return false;
+  }
+}
+
+function resolveScimTenant(providedKey) {
+  if (!providedKey || typeof providedKey !== 'string') return null;
+  for (const [tenant, key] of SCIM_TENANT_KEYS.entries()) {
+    if (scimTimingSafeEqual(providedKey, key)) return tenant;
+  }
+  if (SCIM_API_KEY && scimTimingSafeEqual(providedKey, SCIM_API_KEY)) {
+    return 'default';
+  }
+  return null;
+}
+
+function getScimKeyId(providedKey, tenant) {
+  try {
+    const hash = crypto.createHash('sha256').update(String(providedKey)).digest('hex').slice(0, 8);
+    return `scim:${tenant || 'unknown'}:${hash}`;
+  } catch {
+    return `scim:${tenant || 'unknown'}`;
+  }
+}
+
+function isAllowedScimRole(role) {
+  return typeof role === 'string' && SCIM_ALLOWED_ROLES.includes(role);
+}
 
 if (!JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is required');
@@ -490,20 +563,16 @@ function requireRole(...roles) {
 }
 
 function requireScimAuth(req, res, next) {
+  // SCIM provisioning must use a dedicated provisioning credential.
+  // Regular user JWTs are rejected here so an employee session can never
+  // list or modify users through the SCIM surface.
   const apiKey = req.headers['x-api-key'];
-  const authHeader = req.headers.authorization;
-
-  if (apiKey && apiKey === SCIM_API_KEY) {
-    return next();
-  }
-
-  if (authHeader?.startsWith('Bearer ')) {
-    try {
-      const payload = jwt.verify(authHeader.slice(7), jwtSecret, { algorithms: ['HS256'] });
-      req.user = payload;
+  if (typeof apiKey === 'string' && apiKey.length > 0) {
+    const tenant = resolveScimTenant(apiKey);
+    if (tenant) {
+      req.scimTenant = tenant;
+      req.scimKeyId = getScimKeyId(apiKey, tenant);
       return next();
-    } catch {
-      // Fall through to error
     }
   }
 
@@ -1600,12 +1669,16 @@ app.post('/devices/verify', requireRole(), createUserRateLimiter('device_verify'
 
 app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const count = Math.min(parseInt(req.query.count) || 10, 100);
     const startIndex = Math.max(parseInt(req.query.startIndex) || 1, 1);
     const offset = startIndex - 1;
 
-    let whereClause = '';
-    let queryParams = [];
+    let whereClause = 'WHERE tenant_id = $1';
+    let queryParams = [tenant];
 
     if (req.query.filter) {
       const userNameMatch = req.query.filter.match(/userName\s+eq\s+"([^"]+)"/i);
@@ -1613,7 +1686,7 @@ app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30
       const filterValue = userNameMatch?.[1] || emailMatch?.[1];
 
       if (filterValue) {
-        whereClause = 'WHERE email = $1';
+        whereClause += ` AND email = $${queryParams.length + 1}`;
         queryParams.push(filterValue);
       }
     }
@@ -1646,6 +1719,10 @@ app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30
 
 app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create', 20), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const { userName, name, emails, roles, active, externalId, password } = req.body;
 
     if (!userName) {
@@ -1656,7 +1733,11 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
     const givenName = name?.givenName || '';
     const familyName = name?.familyName || '';
     const displayName = name?.formatted || `${givenName} ${familyName}`.trim() || email;
-    const role = roles?.[0]?.value || 'employee';
+    const requestedRole = roles?.[0]?.value;
+    if (requestedRole && !isAllowedScimRole(requestedRole)) {
+      return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+    }
+    const role = 'employee';
     const userActive = active !== undefined ? active : true;
 
     const exists = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -1680,8 +1761,8 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
     const hashedPassword = await bcrypt.hash(passwordToHash, BCRYPT_COST);
 
     const result = await pool.query(
-      'INSERT INTO users (email, password, name, role, active) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [email, hashedPassword, displayName, role, userActive]
+      'INSERT INTO users (email, password, name, role, active, tenant_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [email, hashedPassword, displayName, role, userActive, tenant]
     );
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -1689,7 +1770,10 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
 
     await sendAuditEvent('scim.user_created', result.rows[0].id, email, {
       method: 'scim',
-      source: externalId || 'SCIM provisioned'
+      source: externalId || 'SCIM provisioned',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`,
+      role
     });
 
     res.status(201).json(scimUser);
@@ -1704,7 +1788,11 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
 
 app.get('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_get', 60), async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
+    const result = await pool.query('SELECT * FROM users WHERE id = $1 AND tenant_id = $2', [req.params.id, tenant]);
     if (!result.rows[0]) {
       return sendScimError(res, 404, 'User not found');
     }
@@ -1719,6 +1807,10 @@ app.get('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_get',
 
 app.put('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_update', 20), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const { userName, name, emails, roles, active } = req.body;
 
     const email = emails?.[0]?.value || userName;
@@ -1726,6 +1818,9 @@ app.put('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_updat
     const familyName = name?.familyName || '';
     const displayName = name?.formatted || `${givenName} ${familyName}`.trim() || email;
     const role = roles?.[0]?.value;
+    if (role && !isAllowedScimRole(role)) {
+      return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+    }
 
     const updateFields = [];
     const updateValues = [];
@@ -1742,23 +1837,37 @@ app.put('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_updat
     }
 
     updateValues.push(req.params.id);
-    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx} RETURNING *`;
+    updateValues.push(tenant);
+    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx++} AND tenant_id = $${paramIdx} RETURNING *`;
 
     const result = await pool.query(query, updateValues);
     if (!result.rows[0]) {
       return sendScimError(res, 404, 'User not found');
     }
 
+    await sendAuditEvent('scim.user_updated', result.rows[0].id, result.rows[0].email, {
+      method: 'scim',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`
+    });
+
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json(formatScimUser(result.rows[0], baseUrl));
   } catch (err) {
     console.error(err);
+    if (err.code === '23505') {
+      return sendScimError(res, 409, 'User already exists');
+    }
     return sendScimError(res, 500, 'Internal error');
   }
 });
 
 app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_patch', 20), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const { Operations } = req.body;
     if (!Operations || !Array.isArray(Operations)) {
       return sendScimError(res, 400, 'Operations array is required');
@@ -1779,7 +1888,10 @@ app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_pat
         } else if (op.path === 'emails[0].value' || op.path === 'userName') {
           updateFields.push(`email = $${paramIdx++}`);
           updateValues.push(op.value);
-        } else if (op.path === 'roles[0].value') {
+        } else if (op.path === 'roles[0].value' || op.path === 'role') {
+          if (!isAllowedScimRole(op.value)) {
+            return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+          }
           updateFields.push(`role = $${paramIdx++}`);
           updateValues.push(op.value);
         } else if (!op.path && op.value && typeof op.value === 'object') {
@@ -1796,8 +1908,18 @@ app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_pat
             updateValues.push(op.value.emails[0].value);
           }
           if (op.value.roles?.[0]?.value) {
+            if (!isAllowedScimRole(op.value.roles[0].value)) {
+              return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+            }
             updateFields.push(`role = $${paramIdx++}`);
             updateValues.push(op.value.roles[0].value);
+          }
+          if (op.value.role && typeof op.value.role === 'string') {
+            if (!isAllowedScimRole(op.value.role)) {
+              return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+            }
+            updateFields.push(`role = $${paramIdx++}`);
+            updateValues.push(op.value.role);
           }
           if (op.value.userName) {
             updateFields.push(`email = $${paramIdx++}`);
@@ -1813,27 +1935,41 @@ app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_pat
 
     updateFields.push('updated_at = NOW()');
     updateValues.push(req.params.id);
+    updateValues.push(tenant);
 
-    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx} RETURNING *`;
+    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx++} AND tenant_id = $${paramIdx} RETURNING *`;
 
     const result = await pool.query(query, updateValues);
     if (!result.rows[0]) {
       return sendScimError(res, 404, 'User not found');
     }
 
+    await sendAuditEvent('scim.user_updated', result.rows[0].id, result.rows[0].email, {
+      method: 'scim',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`
+    });
+
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json(formatScimUser(result.rows[0], baseUrl));
   } catch (err) {
     console.error(err);
+    if (err.code === '23505') {
+      return sendScimError(res, 409, 'User already exists');
+    }
     return sendScimError(res, 500, 'Internal error');
   }
 });
 
 app.delete('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_delete', 10), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const result = await pool.query(
-      'UPDATE users SET active = false, updated_at = NOW() WHERE id = $1 RETURNING id',
-      [req.params.id]
+      'UPDATE users SET active = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [req.params.id, tenant]
     );
 
     if (!result.rows[0]) {
@@ -1841,7 +1977,9 @@ app.delete('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_de
     }
 
     await sendAuditEvent('scim.user_deactivated', parseInt(req.params.id), null, {
-      method: 'scim'
+      method: 'scim',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`
     });
 
     res.status(204).send();
@@ -3071,4 +3209,4 @@ app.listen(PORT, () => {
   console.log(`Auth service running on port ${PORT}`);
 });
 
-module.exports = { app, requireRole, pool, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES };
+module.exports = { app, requireRole, requireScimAuth, pool, parseScimApiKeys, resolveScimTenant, isAllowedScimRole, SCIM_TENANT_KEYS, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES };
