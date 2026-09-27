@@ -369,6 +369,24 @@ function validatePassword(password) {
   return null;
 }
 
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function validateEmail(email) {
+  if (!email || typeof email !== 'string') {
+    return 'Email is required';
+  }
+  const normalized = normalizeEmail(email);
+  if (normalized.length > 254) {
+    return 'Email is too long';
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    return 'Email format is invalid';
+  }
+  return null;
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -951,18 +969,28 @@ initDB().catch((err) => {
 });
 
 app.post('/register', createUserRateLimiter('register', 10), async (req, res) => {
-  const { email, password, name, department, position, tenant_id } = req.body;
+  const { email, password, name, department, position } = req.body;
   if (!email || !password || !name) {
     return res.status(400).json({ message: 'Email, password, and name are required' });
   }
+
+  const emailError = validateEmail(email);
+  if (emailError) {
+    return res.status(400).json({ message: emailError });
+  }
+  const normalizedEmail = normalizeEmail(email);
 
   const passwordError = validatePassword(password);
   if (passwordError) {
     return res.status(400).json({ message: passwordError });
   }
 
+  // Tenant is always assigned server-side. Joining an existing tenant
+  // requires an invite/admin flow, never a client-supplied tenant_id.
+  const tenantId = 'default';
+
   try {
-    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
     if (userExists.rows.length > 0) {
       return res.status(400).json({ message: 'User already exists' });
     }
@@ -971,19 +999,19 @@ app.post('/register', createUserRateLimiter('register', 10), async (req, res) =>
     const result = await pool.query(
       'INSERT INTO users (email, password, name, role, department, position, tenant_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, name, role, department, position, tenant_id',
       [
-        email,
+        normalizedEmail,
         hashedPassword,
         name,
         'employee',
         department || 'General',
         position || 'Staff',
-        tenant_id || 'default'
+        tenantId
       ]
     );
 
-    await sendAuditEvent('auth.register', result.rows[0].id, email, {
+    await sendAuditEvent('auth.register', result.rows[0].id, normalizedEmail, {
       role: 'employee',
-      tenant_id: tenant_id || 'default'
+      tenant_id: tenantId
     });
 
     res.status(201).json({
@@ -1005,18 +1033,20 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
     return res.status(400).json({ message: 'Email and password are required' });
   }
 
+  const normalizedEmail = normalizeEmail(email);
+
   try {
-    if (await isAccountLocked(email)) {
+    if (await isAccountLocked(normalizedEmail)) {
       return res.status(423).json({
         message: `Account locked. Try again in ${LOCKOUT_MINUTES} minutes.`,
       });
     }
 
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
     const user = result.rows[0];
 
     if (!user) {
-      await recordFailedAttempt(email);
+      await recordFailedAttempt(normalizedEmail);
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
@@ -1026,11 +1056,11 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      await recordFailedAttempt(email);
+      await recordFailedAttempt(normalizedEmail);
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    await clearFailedAttempts(email);
+    await clearFailedAttempts(normalizedEmail);
 
     const deviceId = req.headers['x-device-id'];
     const deviceFingerprint = req.headers['x-device-fingerprint'];
@@ -3209,4 +3239,4 @@ app.listen(PORT, () => {
   console.log(`Auth service running on port ${PORT}`);
 });
 
-module.exports = { app, requireRole, requireScimAuth, pool, parseScimApiKeys, resolveScimTenant, isAllowedScimRole, SCIM_TENANT_KEYS, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES };
+module.exports = { app, requireRole, requireScimAuth, pool, parseScimApiKeys, resolveScimTenant, isAllowedScimRole, SCIM_TENANT_KEYS, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES, normalizeEmail, validateEmail };
