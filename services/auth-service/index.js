@@ -395,6 +395,26 @@ async function revokeAllUserSessions(userId) {
   await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
 }
 
+async function issueLoginSession(user, req, res) {
+  const sessionId = uuidv4();
+  const accessToken = signAccessToken(user, sessionId);
+  const refreshToken = await createRefreshToken(user.id);
+  const deviceId = req.headers?.['x-device-id'] || null;
+  await pool.query(
+    `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
+    [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers?.['user-agent'] || '', deviceId,
+     new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
+  );
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+  });
+  return { sessionId, accessToken, refreshToken };
+}
+
 async function recordFailedAttempt(email) {
   const lockedUntil = new Date();
   lockedUntil.setMinutes(lockedUntil.getMinutes() + LOCKOUT_MINUTES);
@@ -944,23 +964,7 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
       });
     }
 
-    const sessionId = uuidv4();
-    const token = signAccessToken(user, sessionId);
-    const refreshToken = await createRefreshToken(user.id);
-
-    await pool.query(
-      `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
-      [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', deviceId || null,
-       new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
-    );
-
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-    });
+    const { sessionId, accessToken: token } = await issueLoginSession(user, req, res);
 
     await sendAuditEvent('auth.login', user.id, email, {
       device_trusted: deviceTrusted,
@@ -1323,21 +1327,7 @@ app.post('/mfa/validate', createUserRateLimiter('mfa_validate', 10), async (req,
 
     if (isChallengeFlow) {
       // Issue full session for login completion
-      const accessToken = signAccessToken(user);
-      const refreshToken = await createRefreshToken(user.id);
-      const sessionId = uuidv4();
-      await pool.query(
-        `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
-        [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', req.headers['x-device-id'] || null,
-         new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
-      );
-      res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-      });
+      const { sessionId, accessToken } = await issueLoginSession(user, req, res);
       await sendAuditEvent('auth.mfa_validate', userId, user.email, { method, mfa_challenge: true });
       return res.json({
         message: 'MFA validated, logged in successfully',
@@ -1961,16 +1951,17 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const token = signAccessToken(userData);
-    const refreshToken = await createRefreshToken(userData.id);
+    const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
     await sendAuditEvent('auth.saml_login', userData.id, email, {
-      ip_address: req.ip
+      ip_address: req.ip,
+      session_id: sessionId
     });
 
     res.json({
       message: 'SAML login successful',
       token,
+      session_id: sessionId,
       user: sanitizeUser(userData)
     });
   } catch (err) {
@@ -2079,14 +2070,16 @@ app.post('/auth/passwordless/verify', createUserRateLimiter('passwordless_verify
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const accessToken = signAccessToken(user);
-    const refreshToken = await createRefreshToken(user.id);
+    const { sessionId, accessToken } = await issueLoginSession(user, req, res);
 
-    await sendAuditEvent('auth.passwordless_login', user.id, user.email);
+    await sendAuditEvent('auth.passwordless_login', user.id, user.email, {
+      session_id: sessionId
+    });
 
     res.json({
       message: 'Logged in successfully',
       token: accessToken,
+      session_id: sessionId,
       user: sanitizeUser(user)
     });
   } catch (err) {
@@ -2452,16 +2445,17 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const token = signAccessToken(user);
-    await createRefreshToken(user.id);
+    const { sessionId, accessToken: token } = await issueLoginSession(user, req, res);
 
     await sendAuditEvent('auth.webauthn_login', user.id, user.email, {
       credential_id: credId.substring(0, 20) + '...',
+      session_id: sessionId,
     });
 
     res.json({
       message: 'Hardware security key authentication successful',
       token,
+      session_id: sessionId,
       user: sanitizeUser(user),
     });
   } catch (err) {
@@ -2791,14 +2785,14 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
          tokenResponse.data.expires_in ? new Date(Date.now() + tokenResponse.data.expires_in * 1000) : null]
       );
 
-      const token = signAccessToken(userData);
-      const refreshToken = await createRefreshToken(userData.id);
+      const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
-      await sendAuditEvent('auth.oauth_login', userData.id, email, { provider });
+      await sendAuditEvent('auth.oauth_login', userData.id, email, { provider, session_id: sessionId });
 
       res.json({
         message: `OAuth ${provider} login successful`,
         token,
+        session_id: sessionId,
         user: sanitizeUser(userData),
         provider,
       });
