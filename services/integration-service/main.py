@@ -114,6 +114,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    try:
+        from webhook_engine import close_all_clients
+        await close_all_clients()
+    except Exception:
+        pass
+
 
 app = FastAPI(
     title="Atlas Integration Service",
