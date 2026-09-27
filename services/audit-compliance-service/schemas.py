@@ -61,6 +61,8 @@ class AuditLogPaginated(PaginatedResponse[AuditLogResponse]):
 
 
 class CompliancePolicyCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     name: str = Field(..., max_length=200)
     description: Optional[str] = None
@@ -71,6 +73,8 @@ class CompliancePolicyCreate(BaseModel):
 
 
 class CompliancePolicyUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: Optional[str] = Field(None, max_length=200)
     description: Optional[str] = None
     category: Optional[str] = Field(None, max_length=50)
