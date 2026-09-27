@@ -718,6 +718,22 @@ async function initDB() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      challenge TEXT NOT NULL UNIQUE,
+      purpose VARCHAR(20) NOT NULL DEFAULT 'registration',
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user ON webauthn_challenges (user_id, purpose, expires_at);`);
+  // Cleanup legacy challenge rows that were stored as pseudo-credentials.
+  try {
+    await pool.query(`DELETE FROM webauthn_credentials WHERE credential_id LIKE 'challenge:%'`);
+  } catch (e) { /* ignore if cleanup fails on older schemas */ }
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS oauth_providers (
       id SERIAL PRIMARY KEY,
       provider VARCHAR(50) NOT NULL,
@@ -2220,19 +2236,56 @@ function base64urlToBase64(base64url) {
   return base64urlToBuffer(base64url).toString('base64');
 }
 
-async function storeChallenge(userId, challenge) {
+const WEBAUTHN_CHALLENGE_TTL_MINUTES = 5;
+
+async function storeWebauthnChallenge(userId, challenge, purpose) {
+  await pool.query(`DELETE FROM webauthn_challenges WHERE expires_at <= NOW()`);
   await pool.query(
-    'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, device_name, device_type) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (credential_id) DO NOTHING',
-    [userId, `challenge:${challenge}`, challenge, 'pending', 'pending']
+    `INSERT INTO webauthn_challenges (user_id, challenge, purpose, expires_at)
+     VALUES ($1, $2, $3, NOW() + ($4 || ' minutes')::INTERVAL)
+     ON CONFLICT (challenge) DO UPDATE SET user_id = EXCLUDED.user_id, purpose = EXCLUDED.purpose, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+    [userId, challenge, purpose, String(WEBAUTHN_CHALLENGE_TTL_MINUTES)]
   );
+}
+
+async function storeChallenge(userId, challenge, purpose = 'registration') {
+  return storeWebauthnChallenge(userId, challenge, purpose);
+}
+
+async function getLatestWebauthnChallenge(userId, purpose) {
+  const result = await pool.query(
+    `SELECT challenge FROM webauthn_challenges
+     WHERE user_id = $1 AND purpose = $2 AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId, purpose]
+  );
+  if (result.rows[0]) return result.rows[0].challenge;
+  // Fallback for in-flight challenges created before the migration.
+  const legacy = await pool.query(
+    `SELECT public_key AS challenge FROM webauthn_credentials
+     WHERE user_id = $1 AND credential_id LIKE 'challenge:%' AND device_name = 'pending'
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  return legacy.rows[0] ? legacy.rows[0].challenge : null;
+}
+
+async function consumeWebauthnChallenge(userId, purpose) {
+  await pool.query(`DELETE FROM webauthn_challenges WHERE user_id = $1 AND purpose = $2`, [userId, purpose]);
+  await pool.query(`DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%'`, [userId]);
 }
 
 async function consumeChallenge(userId, challenge) {
   const result = await pool.query(
+    'DELETE FROM webauthn_challenges WHERE user_id = $1 AND challenge = $2 RETURNING id',
+    [userId, challenge]
+  );
+  if (result.rowCount > 0) return true;
+  const legacy = await pool.query(
     'DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2 RETURNING id',
     [userId, `challenge:${challenge}`]
   );
-  return result.rowCount > 0;
+  return legacy.rowCount > 0;
 }
 
 app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
@@ -2244,7 +2297,7 @@ app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
     const user = userResult.rows[0];
 
     const existing = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true',
+      "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [userId]
     );
 
@@ -2259,7 +2312,7 @@ app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
       })),
     });
 
-    await storeChallenge(userId, options.challenge);
+    await storeWebauthnChallenge(userId, options.challenge, 'registration');
 
     res.json({
       status: 'ok',
@@ -2281,16 +2334,11 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
       return res.status(400).json({ message: 'Invalid credential response' });
     }
 
-    const challengeRow = await pool.query(
-      'SELECT public_key as challenge FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE $2 AND device_name = $3',
-      [userId, 'challenge:%', 'pending']
-    );
+    const expectedChallenge = await getLatestWebauthnChallenge(userId, 'registration');
 
-    if (!challengeRow.rows[0]) {
+    if (!expectedChallenge) {
       return res.status(400).json({ message: 'No pending registration challenge found. Please start registration again.' });
     }
-
-    const expectedChallenge = challengeRow.rows[0].challenge;
 
     const verification = await verifyRegistrationResponse({
       response: credential,
@@ -2305,10 +2353,7 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
 
     const { credentialPublicKey, credentialID, counter } = verification.registrationInfo;
 
-    await pool.query(
-      'DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE $2',
-      [userId, 'challenge:%']
-    );
+    await consumeWebauthnChallenge(userId, 'registration');
 
     const storedCredentialId = Buffer.from(credentialID).toString('base64');
     const storedPublicKey = Buffer.from(credentialPublicKey).toString('base64');
@@ -2353,7 +2398,7 @@ app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 
 
     const userId = userResult.rows[0].id;
     const credentials = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true',
+      "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [userId]
     );
 
@@ -2370,10 +2415,7 @@ app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 
       userVerification: 'preferred',
     });
 
-    await pool.query(
-      'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, device_name, device_type) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (credential_id) DO NOTHING',
-      [userId, `challenge:${options.challenge}`, options.challenge, 'pending', 'pending']
-    );
+    await storeWebauthnChallenge(userId, options.challenge, 'authentication');
 
     res.json({
       status: 'ok',
@@ -2397,7 +2439,7 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
     const credId = base64urlToBase64(credential.id);
 
     const credResult = await pool.query(
-      'SELECT * FROM webauthn_credentials WHERE credential_id = $1 AND is_active = true',
+      "SELECT * FROM webauthn_credentials WHERE credential_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [credId]
     );
 
@@ -2407,16 +2449,11 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
 
     const cred = credResult.rows[0];
 
-    const challengeResult = await pool.query(
-      "SELECT public_key FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%' AND device_name = 'pending'",
-      [cred.user_id]
-    );
+    const expectedChallenge = await getLatestWebauthnChallenge(cred.user_id, 'authentication');
 
-    if (!challengeResult.rows[0]) {
+    if (!expectedChallenge) {
       return res.status(400).json({ message: 'No pending authentication challenge. Please start authentication again.' });
     }
-
-    const expectedChallenge = challengeResult.rows[0].public_key;
 
     const verification = await verifyAuthenticationResponse({
       response: credential,
@@ -2440,10 +2477,7 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
       [verification.authenticationInfo.newCounter, cred.id]
     );
 
-    await pool.query(
-      "DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%'",
-      [cred.user_id]
-    );
+    await consumeWebauthnChallenge(cred.user_id, 'authentication');
 
     const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [cred.user_id]);
     const user = userResult.rows[0];
@@ -2474,7 +2508,7 @@ app.get('/webauthn/credentials', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'SELECT id, credential_id, device_name, device_type, counter, is_active, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at DESC',
+      "SELECT id, credential_id, device_name, device_type, counter, is_active, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 AND credential_id NOT LIKE 'challenge:%' ORDER BY created_at DESC",
       [userId]
     );
     res.json(result.rows.map(r => ({
@@ -2491,7 +2525,7 @@ app.delete('/webauthn/credentials/:id', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 AND is_active = true RETURNING id',
+      "DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 AND is_active = true AND credential_id NOT LIKE 'challenge:%' RETURNING id",
       [parseInt(req.params.id), userId]
     );
     if (!result.rows[0]) {
@@ -2858,4 +2892,4 @@ app.listen(PORT, () => {
   console.log(`Auth service running on port ${PORT}`);
 });
 
-module.exports = { app, requireRole, pool };
+module.exports = { app, requireRole, pool, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES };
