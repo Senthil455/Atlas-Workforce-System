@@ -349,6 +349,22 @@ jobs:
           if missing_docker:
               errors.append(f"docker-build missing: {sorted(missing_docker)}")
 
+          # Every prometheus scrape target must be a service in docker-compose.yml,
+          # otherwise the target stays down and the ServiceDown alert fires (issue #162)
+          compose = yaml.safe_load(pathlib.Path("docker-compose.yml").read_text())
+          compose_services = set(compose.get("services", {}) or {})
+          prom = yaml.safe_load(pathlib.Path("prometheus.yml").read_text())
+          prom_targets = set()
+          for scrape in prom.get("scrape_configs", []) or []:
+              for static in scrape.get("static_configs", []) or []:
+                  for target in static.get("targets", []) or []:
+                      host = target.split(":")[0]
+                      if host != "localhost":
+                          prom_targets.add(host)
+          missing_compose = prom_targets - compose_services
+          if missing_compose:
+              errors.append(f"prometheus targets missing from docker-compose.yml: {sorted(missing_compose)}")
+
           # Go services: every dir with go.mod must be in go-services-check
           go_expected = {p.name for p in services_dir.iterdir() if (p / "go.mod").exists()}
           go_matrix = get_matrix("go-services-check", "service")
