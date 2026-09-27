@@ -317,6 +317,20 @@ jobs:
           fi
           echo "Rendered compose check passed: no default secrets with development mode"
 
+  k8s-validate:
+    name: K8s Manifest Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - name: Install pyyaml
+        run: pip install pyyaml
+      - name: Validate k8s manifests
+        run: python3 scripts/validate-k8s-manifests.py
+
   ci-coverage-check:
     name: CI Coverage Check
     runs-on: ubuntu-latest
