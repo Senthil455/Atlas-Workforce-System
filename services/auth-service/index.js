@@ -42,6 +42,12 @@ const httpRequestsInProgress = new promClient.Gauge({
   labelNames: ['method', 'path'],
 });
 
+const authFailedLoginTotal = new promClient.Counter({
+  name: 'atlas_auth_failed_login_total',
+  help: 'Total failed login attempts',
+  labelNames: ['known_user'],
+});
+
 promClient.collectDefaultMetrics();
 
 const app = express();
@@ -395,31 +401,42 @@ async function revokeAllUserSessions(userId) {
   await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
 }
 
+function normalizeFailedAttemptEmail(email) {
+  return String(email || '').trim().toLowerCase().slice(0, 255);
+}
+
 async function recordFailedAttempt(email) {
+  const key = normalizeFailedAttemptEmail(email);
+  if (!key) return;
   const lockedUntil = new Date();
   lockedUntil.setMinutes(lockedUntil.getMinutes() + LOCKOUT_MINUTES);
 
   await pool.query(
-    `INSERT INTO failed_attempts (email, attempts, locked_until)
-     VALUES ($1, 1, NULL)
+    `INSERT INTO failed_attempts (email, attempts, locked_until, updated_at)
+     VALUES ($1, 1, NULL, NOW())
      ON CONFLICT (email) DO UPDATE SET
        attempts = failed_attempts.attempts + 1,
        locked_until = CASE
          WHEN failed_attempts.attempts + 1 >= $2 THEN $3
          ELSE failed_attempts.locked_until
-       END`,
-    [email, MAX_FAILED_ATTEMPTS, lockedUntil]
+       END,
+       updated_at = NOW()`,
+    [key, MAX_FAILED_ATTEMPTS, lockedUntil]
   );
 }
 
 async function clearFailedAttempts(email) {
-  await pool.query('DELETE FROM failed_attempts WHERE email = $1', [email]);
+  const key = normalizeFailedAttemptEmail(email);
+  if (!key) return;
+  await pool.query('DELETE FROM failed_attempts WHERE email = $1', [key]);
 }
 
 async function isAccountLocked(email) {
+  const key = normalizeFailedAttemptEmail(email);
+  if (!key) return false;
   const result = await pool.query(
-    'SELECT attempts, locked_until FROM failed_attempts WHERE email = $1',
-    [email]
+    'SELECT attempts, locked_until, updated_at FROM failed_attempts WHERE email = $1',
+    [key]
   );
   const row = result.rows[0];
   if (!row) return false;
@@ -427,8 +444,15 @@ async function isAccountLocked(email) {
     return true;
   }
   if (row.locked_until && new Date(row.locked_until) <= new Date()) {
-    await pool.query('DELETE FROM failed_attempts WHERE email = $1', [email]);
+    await pool.query('DELETE FROM failed_attempts WHERE email = $1', [key]);
     return false;
+  }
+  if (!row.locked_until && row.updated_at) {
+    const ageMs = Date.now() - new Date(row.updated_at).getTime();
+    if (ageMs > 60 * 60 * 1000) {
+      await pool.query('DELETE FROM failed_attempts WHERE email = $1', [key]);
+      return false;
+    }
   }
   return false;
 }
@@ -539,6 +563,15 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+setInterval(async () => {
+  try {
+    await pool.query("DELETE FROM failed_attempts WHERE locked_until IS NULL AND updated_at < NOW() - INTERVAL '1 hour'");
+    await pool.query('DELETE FROM failed_attempts WHERE locked_until IS NOT NULL AND locked_until < NOW()');
+  } catch (err) {
+    console.error('Failed to sweep stale failed_attempts rows:', err.message);
+  }
+}, 10 * 60 * 1000);
+
 async function sendAuditEvent(eventType, userId, email, details = {}) {
   try {
     await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, {
@@ -644,9 +677,19 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS failed_attempts (
       email VARCHAR(255) PRIMARY KEY,
       attempts INTEGER DEFAULT 0,
-      locked_until TIMESTAMP
+      locked_until TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  try {
+    await pool.query('ALTER TABLE failed_attempts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()');
+  } catch (err) { /* column may exist */ }
+  try {
+    await pool.query('UPDATE failed_attempts SET updated_at = NOW() WHERE updated_at IS NULL');
+  } catch (err) { /* best effort backfill */ }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_failed_attempts_locked_until ON failed_attempts (locked_until)');
+  } catch (err) { /* index may exist */ }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_mfa (
@@ -875,7 +918,7 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
     const user = result.rows[0];
 
     if (!user) {
-      await recordFailedAttempt(email);
+      authFailedLoginTotal.labels({ known_user: 'false' }).inc();
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
@@ -886,6 +929,7 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       await recordFailedAttempt(email);
+      authFailedLoginTotal.labels({ known_user: 'true' }).inc();
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
