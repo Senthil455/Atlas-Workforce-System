@@ -468,6 +468,26 @@ async function revokeAllUserSessions(userId) {
   await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
 }
 
+async function issueLoginSession(user, req, res) {
+  const sessionId = uuidv4();
+  const accessToken = signAccessToken(user, sessionId);
+  const refreshToken = await createRefreshToken(user.id);
+  const deviceId = req.headers?.['x-device-id'] || null;
+  await pool.query(
+    `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
+    [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers?.['user-agent'] || '', deviceId,
+     new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
+  );
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+  });
+  return { sessionId, accessToken, refreshToken };
+}
+
 async function recordFailedAttempt(email) {
   const lockedUntil = new Date();
   lockedUntil.setMinutes(lockedUntil.getMinutes() + LOCKOUT_MINUTES);
@@ -626,6 +646,31 @@ async function sendAuditEvent(eventType, userId, email, details = {}) {
   }
 }
 
+function getFrontendUrl() {
+  return (process.env.FRONTEND_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+}
+
+// Email sender abstraction. No SMTP is configured in this repo, so the
+// default implementation is a no-op that logs the message. This keeps the
+// password reset flow testable in development without an SMTP server.
+// If SMTP settings are provided via env, this function is the single
+// place to plug in a real transport.
+async function sendEmail({ to, subject, text }) {
+  try {
+    console.log(`[email] to=${to} subject=${subject} body=${text}`);
+    return true;
+  } catch (err) {
+    console.error('Email send failed:', err.message);
+    return false;
+  }
+}
+
+async function sendPasswordResetEmail(email, rawToken, resetUrl) {
+  const subject = 'Reset your Atlas password';
+  const text = `You requested a password reset for your Atlas account.\n\nReset link (valid for 1 hour, single use): ${resetUrl}\n\nIf you did not request this, you can ignore this email.`;
+  return sendEmail({ to: email, subject, text });
+}
+
 function formatScimUser(user, baseUrl) {
   const nameParts = (user.name || '').split(' ');
   return {
@@ -771,6 +816,17 @@ async function initDB() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash VARCHAR(64) NOT NULL UNIQUE,
+      expires_at TIMESTAMP NOT NULL,
+      used BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS webauthn_credentials (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -785,6 +841,22 @@ async function initDB() {
       last_used_at TIMESTAMP
     );
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      challenge TEXT NOT NULL UNIQUE,
+      purpose VARCHAR(20) NOT NULL DEFAULT 'registration',
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user ON webauthn_challenges (user_id, purpose, expires_at);`);
+  // Cleanup legacy challenge rows that were stored as pseudo-credentials.
+  try {
+    await pool.query(`DELETE FROM webauthn_credentials WHERE credential_id LIKE 'challenge:%'`);
+  } catch (e) { /* ignore if cleanup fails on older schemas */ }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS oauth_providers (
@@ -1013,23 +1085,7 @@ app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
       });
     }
 
-    const sessionId = uuidv4();
-    const token = signAccessToken(user, sessionId);
-    const refreshToken = await createRefreshToken(user.id);
-
-    await pool.query(
-      `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
-      [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', deviceId || null,
-       new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
-    );
-
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-    });
+    const { sessionId, accessToken: token } = await issueLoginSession(user, req, res);
 
     await sendAuditEvent('auth.login', user.id, email, {
       device_trusted: deviceTrusted,
@@ -1392,21 +1448,7 @@ app.post('/mfa/validate', createUserRateLimiter('mfa_validate', 10), async (req,
 
     if (isChallengeFlow) {
       // Issue full session for login completion
-      const accessToken = signAccessToken(user);
-      const refreshToken = await createRefreshToken(user.id);
-      const sessionId = uuidv4();
-      await pool.query(
-        `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
-        [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', req.headers['x-device-id'] || null,
-         new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
-      );
-      res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-      });
+      const { sessionId, accessToken } = await issueLoginSession(user, req, res);
       await sendAuditEvent('auth.mfa_validate', userId, user.email, { method, mfa_challenge: true });
       return res.json({
         message: 'MFA validated, logged in successfully',
@@ -1681,7 +1723,7 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
     if (!tenant) {
       return sendScimError(res, 401, 'Authentication required');
     }
-    const { userName, name, emails, roles, active, externalId } = req.body;
+    const { userName, name, emails, roles, active, externalId, password } = req.body;
 
     if (!userName) {
       return sendScimError(res, 400, 'userName is required');
@@ -1703,8 +1745,20 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
       return sendScimError(res, 409, 'User already exists');
     }
 
-    const tempPassword = crypto.randomBytes(16).toString('hex');
-    const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_COST);
+    let passwordToHash;
+    if (password && typeof password === 'string' && password.length > 0) {
+      const passwordError = validatePassword(password);
+      if (passwordError) {
+        return sendScimError(res, 400, passwordError);
+      }
+      passwordToHash = password;
+    } else {
+      // No usable credential is emailed for generated passwords, so the
+      // account must be activated via POST /auth/password/reset-request
+      // or POST /auth/admin/password-reset.
+      passwordToHash = crypto.randomBytes(16).toString('hex');
+    }
+    const hashedPassword = await bcrypt.hash(passwordToHash, BCRYPT_COST);
 
     const result = await pool.query(
       'INSERT INTO users (email, password, name, role, active, tenant_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
@@ -2099,16 +2153,17 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const token = signAccessToken(userData);
-    const refreshToken = await createRefreshToken(userData.id);
+    const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
     await sendAuditEvent('auth.saml_login', userData.id, email, {
-      ip_address: req.ip
+      ip_address: req.ip,
+      session_id: sessionId
     });
 
     res.json({
       message: 'SAML login successful',
       token,
+      session_id: sessionId,
       user: sanitizeUser(userData)
     });
   } catch (err) {
@@ -2217,19 +2272,158 @@ app.post('/auth/passwordless/verify', createUserRateLimiter('passwordless_verify
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const accessToken = signAccessToken(user);
-    const refreshToken = await createRefreshToken(user.id);
+    const { sessionId, accessToken } = await issueLoginSession(user, req, res);
 
-    await sendAuditEvent('auth.passwordless_login', user.id, user.email);
+    await sendAuditEvent('auth.passwordless_login', user.id, user.email, {
+      session_id: sessionId
+    });
 
     res.json({
       message: 'Logged in successfully',
       token: accessToken,
+      session_id: sessionId,
       user: sanitizeUser(user)
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Magic link verification failed' });
+  }
+});
+
+// Request a password reset. Always returns 200 with a generic message so
+// callers cannot enumerate accounts. The raw token is emailed via the
+// email sender abstraction and only the SHA-256 hash is stored.
+app.post('/auth/password/reset-request', createUserRateLimiter('password_reset_request', 5), async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const normalizedEmail = email.trim();
+    const genericMessage = 'If an account exists for this email, a reset link has been sent.';
+
+    const userResult = await pool.query('SELECT id, email, active FROM users WHERE email = $1', [normalizedEmail]);
+    const user = userResult.rows[0];
+
+    if (!user || !user.active) {
+      await sendAuditEvent('auth.password_reset_requested', user?.id || null, normalizedEmail, { found: false });
+      return res.json({ message: genericMessage });
+    }
+
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1 OR expires_at <= NOW()', [user.id]);
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetUrl = `${getFrontendUrl()}/reset-password?token=${rawToken}`;
+    await sendPasswordResetEmail(user.email, rawToken, resetUrl);
+    await sendAuditEvent('auth.password_reset_requested', user.id, user.email, { found: true });
+
+    const response = { message: genericMessage };
+    if (NODE_ENV !== 'production') {
+      response.reset_token = rawToken;
+      response.reset_url = resetUrl;
+    }
+    return res.json(response);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to process reset request' });
+  }
+});
+
+// Complete a password reset with a single-use token. Revokes all sessions
+// on success so stolen tokens cannot be reused.
+app.post('/auth/password/reset', createUserRateLimiter('password_reset', 10), async (req, res) => {
+  try {
+    const { token, password, new_password } = req.body;
+    const newPassword = password || new_password;
+    if (!token || !newPassword) {
+      return res.status(400).json({ message: 'Token and new password are required' });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
+
+    const tokenHash = hashToken(String(token).trim());
+    const tokenResult = await pool.query(
+      'SELECT * FROM password_reset_tokens WHERE token_hash = $1 AND used = false AND expires_at > NOW()',
+      [tokenHash]
+    );
+    const resetRow = tokenResult.rows[0];
+    if (!resetRow) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [resetRow.user_id]);
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+    if (!user.active) {
+      return res.status(403).json({ message: 'Account is deactivated' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashedPassword, user.id]);
+    await pool.query('UPDATE password_reset_tokens SET used = true WHERE token_hash = $1', [tokenHash]);
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND token_hash != $2', [user.id, tokenHash]);
+
+    await revokeAllUserSessions(user.id);
+    await clearFailedAttempts(user.email);
+    await sendAuditEvent('auth.password_reset', user.id, user.email, {});
+
+    return res.json({ message: 'Password has been reset successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Password reset failed' });
+  }
+});
+
+// Admin-only reset for SCIM provisioned or locked-out accounts.
+app.post('/auth/admin/password-reset', requireRole('admin'), createUserRateLimiter('admin_password_reset', 20), async (req, res) => {
+  try {
+    const { email, user_id, userId, password, new_password } = req.body;
+    const targetEmail = email;
+    const targetId = user_id || userId;
+    const newPassword = password || new_password;
+    if ((!targetEmail && !targetId) || !newPassword) {
+      return res.status(400).json({ message: 'Target email or user_id and a new password are required' });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
+
+    const lookup = targetId
+      ? await pool.query('SELECT * FROM users WHERE id = $1', [targetId])
+      : await pool.query('SELECT * FROM users WHERE email = $1', [targetEmail]);
+
+    const user = lookup.rows[0];
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashedPassword, user.id]);
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [user.id]);
+
+    await revokeAllUserSessions(user.id);
+    await clearFailedAttempts(user.email);
+    await sendAuditEvent('auth.admin_password_reset', user.id, user.email, { admin_id: req.user.id });
+
+    return res.json({ message: 'Password reset successfully', user: sanitizeUser({ ...user }) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Admin password reset failed' });
   }
 });
 
@@ -2358,19 +2552,56 @@ function base64urlToBase64(base64url) {
   return base64urlToBuffer(base64url).toString('base64');
 }
 
-async function storeChallenge(userId, challenge) {
+const WEBAUTHN_CHALLENGE_TTL_MINUTES = 5;
+
+async function storeWebauthnChallenge(userId, challenge, purpose) {
+  await pool.query(`DELETE FROM webauthn_challenges WHERE expires_at <= NOW()`);
   await pool.query(
-    'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, device_name, device_type) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (credential_id) DO NOTHING',
-    [userId, `challenge:${challenge}`, challenge, 'pending', 'pending']
+    `INSERT INTO webauthn_challenges (user_id, challenge, purpose, expires_at)
+     VALUES ($1, $2, $3, NOW() + ($4 || ' minutes')::INTERVAL)
+     ON CONFLICT (challenge) DO UPDATE SET user_id = EXCLUDED.user_id, purpose = EXCLUDED.purpose, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+    [userId, challenge, purpose, String(WEBAUTHN_CHALLENGE_TTL_MINUTES)]
   );
+}
+
+async function storeChallenge(userId, challenge, purpose = 'registration') {
+  return storeWebauthnChallenge(userId, challenge, purpose);
+}
+
+async function getLatestWebauthnChallenge(userId, purpose) {
+  const result = await pool.query(
+    `SELECT challenge FROM webauthn_challenges
+     WHERE user_id = $1 AND purpose = $2 AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId, purpose]
+  );
+  if (result.rows[0]) return result.rows[0].challenge;
+  // Fallback for in-flight challenges created before the migration.
+  const legacy = await pool.query(
+    `SELECT public_key AS challenge FROM webauthn_credentials
+     WHERE user_id = $1 AND credential_id LIKE 'challenge:%' AND device_name = 'pending'
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  return legacy.rows[0] ? legacy.rows[0].challenge : null;
+}
+
+async function consumeWebauthnChallenge(userId, purpose) {
+  await pool.query(`DELETE FROM webauthn_challenges WHERE user_id = $1 AND purpose = $2`, [userId, purpose]);
+  await pool.query(`DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%'`, [userId]);
 }
 
 async function consumeChallenge(userId, challenge) {
   const result = await pool.query(
+    'DELETE FROM webauthn_challenges WHERE user_id = $1 AND challenge = $2 RETURNING id',
+    [userId, challenge]
+  );
+  if (result.rowCount > 0) return true;
+  const legacy = await pool.query(
     'DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2 RETURNING id',
     [userId, `challenge:${challenge}`]
   );
-  return result.rowCount > 0;
+  return legacy.rowCount > 0;
 }
 
 app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
@@ -2382,7 +2613,7 @@ app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
     const user = userResult.rows[0];
 
     const existing = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true',
+      "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [userId]
     );
 
@@ -2397,7 +2628,7 @@ app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
       })),
     });
 
-    await storeChallenge(userId, options.challenge);
+    await storeWebauthnChallenge(userId, options.challenge, 'registration');
 
     res.json({
       status: 'ok',
@@ -2419,16 +2650,11 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
       return res.status(400).json({ message: 'Invalid credential response' });
     }
 
-    const challengeRow = await pool.query(
-      'SELECT public_key as challenge FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE $2 AND device_name = $3',
-      [userId, 'challenge:%', 'pending']
-    );
+    const expectedChallenge = await getLatestWebauthnChallenge(userId, 'registration');
 
-    if (!challengeRow.rows[0]) {
+    if (!expectedChallenge) {
       return res.status(400).json({ message: 'No pending registration challenge found. Please start registration again.' });
     }
-
-    const expectedChallenge = challengeRow.rows[0].challenge;
 
     const verification = await verifyRegistrationResponse({
       response: credential,
@@ -2443,10 +2669,7 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
 
     const { credentialPublicKey, credentialID, counter } = verification.registrationInfo;
 
-    await pool.query(
-      'DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE $2',
-      [userId, 'challenge:%']
-    );
+    await consumeWebauthnChallenge(userId, 'registration');
 
     const storedCredentialId = Buffer.from(credentialID).toString('base64');
     const storedPublicKey = Buffer.from(credentialPublicKey).toString('base64');
@@ -2491,7 +2714,7 @@ app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 
 
     const userId = userResult.rows[0].id;
     const credentials = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true',
+      "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [userId]
     );
 
@@ -2508,10 +2731,7 @@ app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 
       userVerification: 'preferred',
     });
 
-    await pool.query(
-      'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, device_name, device_type) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (credential_id) DO NOTHING',
-      [userId, `challenge:${options.challenge}`, options.challenge, 'pending', 'pending']
-    );
+    await storeWebauthnChallenge(userId, options.challenge, 'authentication');
 
     res.json({
       status: 'ok',
@@ -2535,7 +2755,7 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
     const credId = base64urlToBase64(credential.id);
 
     const credResult = await pool.query(
-      'SELECT * FROM webauthn_credentials WHERE credential_id = $1 AND is_active = true',
+      "SELECT * FROM webauthn_credentials WHERE credential_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [credId]
     );
 
@@ -2545,16 +2765,11 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
 
     const cred = credResult.rows[0];
 
-    const challengeResult = await pool.query(
-      "SELECT public_key FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%' AND device_name = 'pending'",
-      [cred.user_id]
-    );
+    const expectedChallenge = await getLatestWebauthnChallenge(cred.user_id, 'authentication');
 
-    if (!challengeResult.rows[0]) {
+    if (!expectedChallenge) {
       return res.status(400).json({ message: 'No pending authentication challenge. Please start authentication again.' });
     }
-
-    const expectedChallenge = challengeResult.rows[0].public_key;
 
     const verification = await verifyAuthenticationResponse({
       response: credential,
@@ -2578,10 +2793,7 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
       [verification.authenticationInfo.newCounter, cred.id]
     );
 
-    await pool.query(
-      "DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%'",
-      [cred.user_id]
-    );
+    await consumeWebauthnChallenge(cred.user_id, 'authentication');
 
     const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [cred.user_id]);
     const user = userResult.rows[0];
@@ -2590,16 +2802,17 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const token = signAccessToken(user);
-    await createRefreshToken(user.id);
+    const { sessionId, accessToken: token } = await issueLoginSession(user, req, res);
 
     await sendAuditEvent('auth.webauthn_login', user.id, user.email, {
       credential_id: credId.substring(0, 20) + '...',
+      session_id: sessionId,
     });
 
     res.json({
       message: 'Hardware security key authentication successful',
       token,
+      session_id: sessionId,
       user: sanitizeUser(user),
     });
   } catch (err) {
@@ -2612,7 +2825,7 @@ app.get('/webauthn/credentials', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'SELECT id, credential_id, device_name, device_type, counter, is_active, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at DESC',
+      "SELECT id, credential_id, device_name, device_type, counter, is_active, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 AND credential_id NOT LIKE 'challenge:%' ORDER BY created_at DESC",
       [userId]
     );
     res.json(result.rows.map(r => ({
@@ -2629,7 +2842,7 @@ app.delete('/webauthn/credentials/:id', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 AND is_active = true RETURNING id',
+      "DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 AND is_active = true AND credential_id NOT LIKE 'challenge:%' RETURNING id",
       [parseInt(req.params.id), userId]
     );
     if (!result.rows[0]) {
@@ -2929,14 +3142,14 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
          tokenResponse.data.expires_in ? new Date(Date.now() + tokenResponse.data.expires_in * 1000) : null]
       );
 
-      const token = signAccessToken(userData);
-      const refreshToken = await createRefreshToken(userData.id);
+      const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
-      await sendAuditEvent('auth.oauth_login', userData.id, email, { provider });
+      await sendAuditEvent('auth.oauth_login', userData.id, email, { provider, session_id: sessionId });
 
       res.json({
         message: `OAuth ${provider} login successful`,
         token,
+        session_id: sessionId,
         user: sanitizeUser(userData),
         provider,
       });
@@ -2996,4 +3209,4 @@ app.listen(PORT, () => {
   console.log(`Auth service running on port ${PORT}`);
 });
 
-module.exports = { app, requireRole, requireScimAuth, pool, parseScimApiKeys, resolveScimTenant, isAllowedScimRole, SCIM_TENANT_KEYS };
+module.exports = { app, requireRole, requireScimAuth, pool, parseScimApiKeys, resolveScimTenant, isAllowedScimRole, SCIM_TENANT_KEYS, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES };
