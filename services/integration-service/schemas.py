@@ -15,6 +15,8 @@ class MessageResponse(BaseModel):
 
 
 class WebhookCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: str = Field(..., max_length=200)
     url: str = Field(..., max_length=500)
     secret: Optional[str] = None
@@ -48,6 +50,8 @@ class WebhookCreate(BaseModel):
 
 
 class WebhookUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: Optional[str] = Field(None, max_length=200)
     url: Optional[str] = Field(None, max_length=500)
     secret: Optional[str] = None
@@ -121,6 +125,8 @@ class WebhookDeliveryLogResponse(BaseModel):
 
 
 class EventSubscriptionCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     event_type: str = Field(..., max_length=100)
     source_service: Optional[str] = None
     kafka_topic: Optional[str] = Field(None, max_length=200)
@@ -128,6 +134,8 @@ class EventSubscriptionCreate(BaseModel):
 
 
 class EventSubscriptionUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     event_type: Optional[str] = Field(None, max_length=100)
     source_service: Optional[str] = None
     kafka_topic: Optional[str] = Field(None, max_length=200)
@@ -166,12 +174,16 @@ class EventOutboxResponse(BaseModel):
 
 
 class IntegrationConfigCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     key: str = Field(..., max_length=200)
     value: Any
     description: Optional[str] = None
 
 
 class IntegrationConfigUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     value: Any
     description: Optional[str] = None
 

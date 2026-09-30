@@ -17,6 +17,39 @@ from models import (
 from ssrf_guard import SSRFBlockedError, validate_webhook_headers, validate_webhook_url
 
 
+class MassAssignmentError(ValueError):
+    pass
+
+
+def apply_updates(obj, data: dict, allowed_fields: set):
+    unknown = [k for k in data.keys() if k not in allowed_fields]
+    if unknown:
+        raise MassAssignmentError(f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
+    for key in allowed_fields:
+        if key in data and data[key] is not None:
+            setattr(obj, key, data[key])
+    return obj
+
+
+def filter_create_data(data: dict, allowed_fields: set) -> dict:
+    unknown = [k for k in data.keys() if k not in allowed_fields]
+    if unknown:
+        raise MassAssignmentError(f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
+    return {k: data[k] for k in allowed_fields if k in data}
+
+
+WEBHOOK_CREATE_FIELDS = frozenset({"name", "url", "secret", "event_types", "headers", "retry_count", "retry_interval_sec", "timeout_sec"})
+WEBHOOK_UPDATE_FIELDS = frozenset({"name", "url", "secret", "event_types", "headers", "retry_count", "retry_interval_sec", "timeout_sec", "enabled", "last_triggered_at"})
+
+EVENT_SUB_CREATE_FIELDS = frozenset({"event_type", "source_service", "kafka_topic", "transform_template"})
+EVENT_SUB_UPDATE_FIELDS = frozenset({"event_type", "source_service", "kafka_topic", "transform_template", "enabled"})
+
+INTEGRATION_CONFIG_CREATE_FIELDS = frozenset({"key", "value", "description"})
+INTEGRATION_CONFIG_UPDATE_FIELDS = frozenset({"value", "description"})
+
+DELIVERY_LOG_UPDATE_FIELDS = frozenset({"status", "status_code", "response_body", "attempts", "max_attempts", "next_retry_at", "delivered_at"})
+
+
 def list_webhooks(
     db: Session,
     tenant_id: str,
@@ -37,13 +70,14 @@ def get_webhook(db: Session, webhook_id: UUID, tenant_id: str) -> Optional[Webho
 
 
 def create_webhook(db: Session, tenant_id: str, data: dict) -> Webhook:
-    url = data.get("url", "")
+    filtered = filter_create_data(data, WEBHOOK_CREATE_FIELDS)
+    url = filtered.get("url", "")
     try:
         validate_webhook_url(url)
-        validate_webhook_headers(data.get("headers"))
+        validate_webhook_headers(filtered.get("headers"))
     except SSRFBlockedError as e:
         raise ValueError(str(e))
-    webhook = Webhook(tenant_id=tenant_id, **data)
+    webhook = Webhook(tenant_id=tenant_id, **filtered)
     db.add(webhook)
     db.commit()
     db.refresh(webhook)
@@ -64,9 +98,7 @@ def update_webhook(db: Session, webhook_id: UUID, tenant_id: str, data: dict) ->
             validate_webhook_headers(data["headers"])
         except SSRFBlockedError as e:
             raise ValueError(str(e))
-    for key, value in data.items():
-        if value is not None:
-            setattr(webhook, key, value)
+    apply_updates(webhook, data, WEBHOOK_UPDATE_FIELDS)
     webhook.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(webhook)
@@ -118,8 +150,7 @@ def update_delivery_log(db: Session, log_id: UUID, data: dict) -> Optional[Webho
     log = db.query(WebhookDeliveryLog).filter(WebhookDeliveryLog.id == log_id).first()
     if not log:
         return None
-    for key, value in data.items():
-        setattr(log, key, value)
+    apply_updates(log, data, DELIVERY_LOG_UPDATE_FIELDS)
     db.commit()
     db.refresh(log)
     return log
@@ -159,7 +190,7 @@ def get_event_subscription(db: Session, sub_id: UUID, tenant_id: str) -> Optiona
 
 
 def create_event_subscription(db: Session, tenant_id: str, data: dict) -> EventSubscription:
-    sub = EventSubscription(tenant_id=tenant_id, **data)
+    sub = EventSubscription(tenant_id=tenant_id, **filter_create_data(data, EVENT_SUB_CREATE_FIELDS))
     db.add(sub)
     db.commit()
     db.refresh(sub)
@@ -170,9 +201,7 @@ def update_event_subscription(db: Session, sub_id: UUID, tenant_id: str, data: d
     sub = get_event_subscription(db, sub_id, tenant_id)
     if not sub:
         return None
-    for key, value in data.items():
-        if value is not None:
-            setattr(sub, key, value)
+    apply_updates(sub, data, EVENT_SUB_UPDATE_FIELDS)
     sub.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(sub)
@@ -253,7 +282,7 @@ def get_integration_config(db: Session, tenant_id: str, key: str) -> Optional[In
 
 
 def create_integration_config(db: Session, tenant_id: str, data: dict) -> IntegrationConfig:
-    config = IntegrationConfig(tenant_id=tenant_id, **data)
+    config = IntegrationConfig(tenant_id=tenant_id, **filter_create_data(data, INTEGRATION_CONFIG_CREATE_FIELDS))
     db.add(config)
     db.commit()
     db.refresh(config)

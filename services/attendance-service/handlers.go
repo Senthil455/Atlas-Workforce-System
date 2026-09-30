@@ -25,6 +25,9 @@ func listAttendance(c *fiber.Ctx) error {
 	if db == nil {
 		return c.JSON([]AttendanceRecord{})
 	}
+	// Best-effort flag for records left open past the threshold (forgotten
+	// clock-out). Runs async so reads stay fast; skips already-flagged rows.
+	go flagStaleOpenRecords(tenantId)
 	var records []AttendanceRecord
 	q := db.Where("tenant_id = ?", tenantId).Order("date DESC, clock_in DESC")
 
@@ -159,7 +162,7 @@ func clockIn(c *fiber.Ctx) error {
 		TenantID:    tenantId,
 		EmployeeID:  req.EmployeeID,
 		Date:        today,
-		ClockIn:     time.Now(),
+		ClockIn:     time.Now().UTC(),
 		Status:      status,
 		Method:      method,
 		Latitude:    req.Latitude,
@@ -252,15 +255,18 @@ func clockOut(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Already clocked out"})
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	record.ClockOut = &now
 
-	// Smart overtime calculation
-	duration := now.Sub(record.ClockIn).Hours()
-	standardHours := getStandardHours(tenantId, req.EmployeeID, today)
-	if duration > standardHours {
-		record.Overtime = math.Round((duration-standardHours)*100) / 100
-	}
+	// Overtime is capped at the shift policy maximum. Anything beyond the
+	// cap is not payable and is recorded as an anomaly for manager review,
+	// so a forgotten clock-out cannot turn into unlimited paid overtime.
+	duration := now.Sub(record.ClockIn.UTC()).Hours()
+	policy := getShiftPolicy(tenantId, req.EmployeeID, today)
+	payable, excess := computeCappedOvertime(duration, policy.standardHours, policy.maxOvertime)
+	record.Overtime = payable
+	record.OvertimeMultiplier = policy.multiplier
+	record.OvertimeCapped = excess > 0
 
 	if req.Method != "" {
 		record.Method = req.Method
@@ -276,6 +282,19 @@ func clockOut(c *fiber.Ctx) error {
 	}
 
 	tx.Commit()
+
+	if excess > 0 {
+		severity := "medium"
+		if excess > 8 {
+			severity = "high"
+		}
+		logAnomaly(tenantId, req.EmployeeID, &record.ID, "overtime_capped", severity,
+			fmt.Sprintf("Raw overtime of %.2fh exceeded the %.2fh policy cap; %.2fh held for review instead of payroll", payable+excess, policy.maxOvertime, excess))
+	}
+	if duration > MaxOpenRecordHours {
+		logAnomaly(tenantId, req.EmployeeID, &record.ID, "excessive_shift_length", "high",
+			fmt.Sprintf("Shift ran %.2fh without clock-out; manager approval required before payout", math.Round(duration*100)/100))
+	}
 
 	// Publish clock-out event to live dashboard
 	publishEvent("attendance.clockout", tenantId, record)
@@ -392,11 +411,86 @@ func createShift(c *fiber.Ctx) error {
 	if err := c.BodyParser(&shift); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 	}
+	if err := validateShiftTimes(shift.StartTime, shift.EndTime); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := validateShiftPolicyNumbers(shift.MaxOvertime, shift.OvertimeMultiplier); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
 	shift.TenantID = getTenant(c)
 	if db != nil {
 		db.Create(&shift)
 	}
 	return c.Status(201).JSON(shift)
+}
+
+// validateShiftTimes rejects unparseable or zero-length shift windows.
+func validateShiftTimes(start, end string) error {
+	if _, _, err := parseShiftTime(start); err != nil {
+		return fmt.Errorf("invalid startTime: %v", err)
+	}
+	if _, _, err := parseShiftTime(end); err != nil {
+		return fmt.Errorf("invalid endTime: %v", err)
+	}
+	if _, err := shiftDurationHours(start, end); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateShiftPolicyNumbers(maxOT, multiplier float64) error {
+	if maxOT < 0 {
+		return fmt.Errorf("maxOvertime cannot be negative")
+	}
+	if multiplier < 0 {
+		return fmt.Errorf("overtimeMultiplier cannot be negative")
+	}
+	return nil
+}
+
+// validateShiftUpdateMap checks time/policy fields when they are part of a
+// partial shift update. Missing keys are left untouched.
+func validateShiftUpdateMap(updates map[string]interface{}) error {
+	start, hasStart := updates["startTime"].(string)
+	end, hasEnd := updates["endTime"].(string)
+	if hasStart && hasEnd {
+		if err := validateShiftTimes(start, end); err != nil {
+			return err
+		}
+	} else if hasStart {
+		if _, _, err := parseShiftTime(start); err != nil {
+			return fmt.Errorf("invalid startTime: %v", err)
+		}
+	} else if hasEnd {
+		if _, _, err := parseShiftTime(end); err != nil {
+			return fmt.Errorf("invalid endTime: %v", err)
+		}
+	}
+	if v, ok := updates["maxOvertime"]; ok {
+		if f, ok := toFloat(v); ok && f < 0 {
+			return fmt.Errorf("maxOvertime cannot be negative")
+		}
+	}
+	if v, ok := updates["overtimeMultiplier"]; ok {
+		if f, ok := toFloat(v); ok && f < 0 {
+			return fmt.Errorf("overtimeMultiplier cannot be negative")
+		}
+	}
+	return nil
+}
+
+func toFloat(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
 }
 
 func updateShift(c *fiber.Ctx) error {
@@ -409,6 +503,9 @@ func updateShift(c *fiber.Ctx) error {
 	var updates map[string]interface{}
 	if err := c.BodyParser(&updates); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
+	}
+	if err := validateShiftUpdateMap(updates); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	db.Model(&shift).Updates(updates)
 	db.First(&shift)
@@ -1090,25 +1187,165 @@ func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 	return R * c
 }
 
-func getStandardHours(tenantID, employeeID, date string) float64 {
-	hours := 8.0
-	if db == nil {
-		return hours
-	}
-	var roster Roster
-	err := db.Where("tenant_id = ? AND employee_id = ? AND date = ?", tenantID, employeeID, date).
-		Preload("Shift").First(&roster).Error
-	if err == nil && roster.Shift.ID != 0 {
-		startH, startM := 0, 0
-		endH, endM := 0, 0
-		fmt.Sscanf(roster.Shift.StartTime, "%d:%d", &startH, &startM)
-		fmt.Sscanf(roster.Shift.EndTime, "%d:%d", &endH, &endM)
-		shiftHours := float64(endH-startH) + float64(endM-startM)/60.0
-		if shiftHours > 0 {
-			hours = shiftHours
+const (
+	// DefaultStandardHours applies when no shift policy matches.
+	DefaultStandardHours = 8.0
+	// DefaultMaxOvertimeHours caps payable overtime per day when the shift
+	// policy does not define its own cap.
+	DefaultMaxOvertimeHours = 4.0
+	// DefaultOvertimeMultiplier applies when the shift policy defines none.
+	DefaultOvertimeMultiplier = 1.0
+	// MaxOpenRecordHours flags a still-open record as a forgotten clock-out.
+	MaxOpenRecordHours = 16.0
+)
+
+// shiftPolicy bundles the per-day rules resolved from roster/assignment.
+type shiftPolicy struct {
+	standardHours float64
+	maxOvertime   float64
+	multiplier    float64
+}
+
+// parseShiftTime accepts "15:04" plus common variants such as "3:04 PM".
+func parseShiftTime(s string) (int, int, error) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{"15:04", "15:04:05", "3:04 PM", "3:04PM", "3:04 pm"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Hour(), t.Minute(), nil
 		}
 	}
-	return hours
+	return 0, 0, fmt.Errorf("invalid shift time %q: expected HH:MM (24h)", s)
+}
+
+// shiftDurationHours returns the shift length in hours, correctly handling
+// shifts that cross midnight (e.g. 22:00 to 06:00 is 8 hours).
+func shiftDurationHours(start, end string) (float64, error) {
+	sh, sm, err := parseShiftTime(start)
+	if err != nil {
+		return 0, err
+	}
+	eh, em, err := parseShiftTime(end)
+	if err != nil {
+		return 0, err
+	}
+	mins := (eh*60 + em) - (sh*60 + sm)
+	if mins == 0 {
+		return 0, fmt.Errorf("zero-length shift %q-%q", start, end)
+	}
+	if mins < 0 {
+		mins += 24 * 60
+	}
+	return float64(mins) / 60.0, nil
+}
+
+// computeCappedOvertime caps payable overtime at maxOvertime. The remainder
+// comes back as excess so callers can hold it for review instead of payroll.
+func computeCappedOvertime(durationHours, standardHours, maxOvertime float64) (payable, excess float64) {
+	if maxOvertime < 0 {
+		maxOvertime = 0
+	}
+	raw := math.Round((durationHours-standardHours)*100) / 100
+	if raw <= 0 {
+		return 0, 0
+	}
+	if raw > maxOvertime {
+		return maxOvertime, math.Round((raw-maxOvertime)*100) / 100
+	}
+	return raw, 0
+}
+
+// isExcessiveShift reports whether a single open stretch ran past the
+// forgotten-clock-out threshold.
+func isExcessiveShift(durationHours float64) bool {
+	return durationHours > MaxOpenRecordHours
+}
+
+func applyShiftPolicy(p *shiftPolicy, s *Shift) {
+	if hrs, err := shiftDurationHours(s.StartTime, s.EndTime); err == nil && hrs > 0 {
+		p.standardHours = hrs
+	}
+	if s.MaxOvertime > 0 {
+		p.maxOvertime = s.MaxOvertime
+	}
+	if s.OvertimeMultiplier > 0 {
+		p.multiplier = s.OvertimeMultiplier
+	}
+}
+
+// getShiftPolicy resolves roster first, then the active shift assignment,
+// falling back to sane defaults when nothing matches or parses.
+func getShiftPolicy(tenantID, employeeID, date string) shiftPolicy {
+	p := shiftPolicy{
+		standardHours: DefaultStandardHours,
+		maxOvertime:   DefaultMaxOvertimeHours,
+		multiplier:    DefaultOvertimeMultiplier,
+	}
+	if db == nil {
+		return p
+	}
+	var roster Roster
+	if err := db.Where("tenant_id = ? AND employee_id = ? AND date = ?", tenantID, employeeID, date).
+		Preload("Shift").First(&roster).Error; err == nil && roster.Shift.ID != 0 {
+		applyShiftPolicy(&p, &roster.Shift)
+		return p
+	}
+	var es EmployeeShift
+	if err := db.Where("tenant_id = ? AND employee_id = ? AND is_active = ?", tenantID, employeeID, true).
+		Preload("Shift").First(&es).Error; err == nil && es.Shift.ID != 0 {
+		applyShiftPolicy(&p, &es.Shift)
+	}
+	return p
+}
+
+func getStandardHours(tenantID, employeeID, date string) float64 {
+	return getShiftPolicy(tenantID, employeeID, date).standardHours
+}
+
+// logAnomaly records an anomaly unless db is unavailable.
+func logAnomaly(tenantID, employeeID string, recordID *uint, anomalyType, severity, description string) {
+	if db == nil {
+		return
+	}
+	db.Create(&AnomalyLog{
+		TenantID:    tenantID,
+		EmployeeID:  employeeID,
+		RecordID:    recordID,
+		AnomalyType: anomalyType,
+		Severity:    severity,
+		Description: description,
+		DetectedAt:  time.Now().UTC(),
+	})
+}
+
+// flagStaleOpenRecords marks still-open records past the threshold so a
+// forgotten clock-out shows up in the anomaly list instead of silently
+// growing. Already-flagged rows are skipped.
+func flagStaleOpenRecords(tenantId string) {
+	if db == nil {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-MaxOpenRecordHours * time.Hour)
+	var stale []AttendanceRecord
+	db.Where("tenant_id = ? AND clock_out IS NULL AND clock_in < ?", tenantId, cutoff).Find(&stale)
+	for i := range stale {
+		r := stale[i]
+		var existing int64
+		db.Model(&AnomalyLog{}).Where("tenant_id = ? AND record_id = ? AND anomaly_type = ? AND is_resolved = ?",
+			tenantId, r.ID, "open_record_exceeded", false).Count(&existing)
+		if existing > 0 {
+			continue
+		}
+		openHours := math.Round(time.Now().UTC().Sub(r.ClockIn.UTC()).Hours()*100) / 100
+		db.Create(&AnomalyLog{
+			TenantID:    tenantId,
+			EmployeeID:  r.EmployeeID,
+			RecordID:    &r.ID,
+			AnomalyType: "open_record_exceeded",
+			Severity:    "high",
+			Description: fmt.Sprintf("Record open for %.2fh without clock-out; capping applies at clock-out and manager review is required", openHours),
+			DetectedAt:  time.Now().UTC(),
+		})
+	}
 }
 
 func checkLateArrival(tenantID, employeeID, date, currentStatus string) string {
@@ -1125,10 +1362,12 @@ func checkLateArrival(tenantID, employeeID, date, currentStatus string) string {
 		return currentStatus
 	}
 	shift := es.Shift
-	var startH, startM int
-	fmt.Sscanf(shift.StartTime, "%d:%d", &startH, &startM)
-	now := time.Now()
-	shiftStart := time.Date(now.Year(), now.Month(), now.Day(), startH, startM+shift.GraceMinutes, 0, 0, now.Location())
+	startH, startM, err := parseShiftTime(shift.StartTime)
+	if err != nil {
+		return currentStatus
+	}
+	now := time.Now().UTC()
+	shiftStart := time.Date(now.Year(), now.Month(), now.Day(), startH, startM+shift.GraceMinutes, 0, 0, time.UTC)
 	if now.After(shiftStart) {
 		return "LATE"
 	}

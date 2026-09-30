@@ -87,3 +87,40 @@ scrape_configs:
   - job_name: 'workforce-planning-service'
     static_configs:
       - targets: ['workforce-planning-service:8017']
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: 'blackbox-exporter'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://api-gateway:8080/health
+          - http://auth-service:8010/health
+          - http://employee-service:8001/health
+          - http://payroll-service:8002/health
+          - http://analytics-service:8003/health
+          - http://notification-service:8004/health
+          - http://attendance-service:8005/health
+          - http://leave-service:8006/health
+          - http://audit-compliance-service:8011/health
+          - http://ats-service:8012/health
+          - http://lms-service:8013/health
+          - http://performance-service:8014/health
+          - http://ai-copilot-service:8015/health
+          - http://integration-service:8016/health
+          - http://workforce-planning-service:8017/health
+          - http://security-service:8050/health
+          - http://ai-service:8065/health
+          - http://live-service:8060/health
+          - http://employee-lifecycle-service:8020/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
