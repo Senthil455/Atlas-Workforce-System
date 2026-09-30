@@ -14,6 +14,7 @@ from models import (
     Webhook,
     WebhookDeliveryLog,
 )
+from ssrf_guard import SSRFBlockedError, validate_webhook_headers, validate_webhook_url
 
 
 class MassAssignmentError(ValueError):
@@ -69,7 +70,14 @@ def get_webhook(db: Session, webhook_id: UUID, tenant_id: str) -> Optional[Webho
 
 
 def create_webhook(db: Session, tenant_id: str, data: dict) -> Webhook:
-    webhook = Webhook(tenant_id=tenant_id, **filter_create_data(data, WEBHOOK_CREATE_FIELDS))
+    filtered = filter_create_data(data, WEBHOOK_CREATE_FIELDS)
+    url = filtered.get("url", "")
+    try:
+        validate_webhook_url(url)
+        validate_webhook_headers(filtered.get("headers"))
+    except SSRFBlockedError as e:
+        raise ValueError(str(e))
+    webhook = Webhook(tenant_id=tenant_id, **filtered)
     db.add(webhook)
     db.commit()
     db.refresh(webhook)
@@ -80,6 +88,16 @@ def update_webhook(db: Session, webhook_id: UUID, tenant_id: str, data: dict) ->
     webhook = get_webhook(db, webhook_id, tenant_id)
     if not webhook:
         return None
+    if "url" in data and data["url"] is not None:
+        try:
+            validate_webhook_url(data["url"])
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
+    if "headers" in data and data["headers"] is not None:
+        try:
+            validate_webhook_headers(data["headers"])
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
     apply_updates(webhook, data, WEBHOOK_UPDATE_FIELDS)
     webhook.updated_at = datetime.now(timezone.utc)
     db.commit()

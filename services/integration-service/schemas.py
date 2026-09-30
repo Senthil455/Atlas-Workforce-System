@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -26,6 +26,28 @@ class WebhookCreate(BaseModel):
     retry_interval_sec: int = Field(default=60, ge=10, le=3600)
     timeout_sec: int = Field(default=30, ge=5, le=120)
 
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        from ssrf_guard import SSRFBlockedError, validate_webhook_url
+
+        try:
+            return validate_webhook_url(v)
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
+
+    @field_validator("headers")
+    @classmethod
+    def _check_headers(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        if v is None:
+            return v
+        from ssrf_guard import SSRFBlockedError, validate_webhook_headers
+
+        try:
+            return validate_webhook_headers(v)
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
+
 
 class WebhookUpdate(BaseModel):
     model_config = {"extra": "forbid"}
@@ -39,6 +61,30 @@ class WebhookUpdate(BaseModel):
     retry_interval_sec: Optional[int] = Field(None, ge=10, le=3600)
     timeout_sec: Optional[int] = Field(None, ge=5, le=120)
     enabled: Optional[bool] = None
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        from ssrf_guard import SSRFBlockedError, validate_webhook_url
+
+        try:
+            return validate_webhook_url(v)
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
+
+    @field_validator("headers")
+    @classmethod
+    def _check_headers(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        if v is None:
+            return v
+        from ssrf_guard import SSRFBlockedError, validate_webhook_headers
+
+        try:
+            return validate_webhook_headers(v)
+        except SSRFBlockedError as e:
+            raise ValueError(str(e))
 
 
 class WebhookResponse(BaseModel):

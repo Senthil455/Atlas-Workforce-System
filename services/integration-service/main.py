@@ -246,7 +246,7 @@ async def create_integration_webhook(
 ):
     try:
         return create_webhook(db, x_tenant_id, payload.model_dump())
-    except MassAssignmentError as e:
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -271,7 +271,7 @@ async def update_integration_webhook(
 ):
     try:
         wh = update_webhook(db, webhook_id, x_tenant_id, payload.model_dump(exclude_unset=True))
-    except MassAssignmentError as e:
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook not found")
