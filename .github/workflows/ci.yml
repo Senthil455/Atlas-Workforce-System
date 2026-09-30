@@ -48,6 +48,24 @@ jobs:
   node-services-check:
     name: Node Services CI
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-test-jwt-secret-value
+      INTERNAL_JWT_SECRET: ci-test-internal-secret-value
+      AUDIT_INTERNAL_KEY: ci-test-audit-key
+      ADMIN_DEFAULT_PASSWORD: ci-test-admin-password-value
+      SCIM_API_KEY: ci-test-scim-key
+      POSTGRES_URL: postgresql://test:test@localhost:5432/test
     strategy:
       matrix:
         service: [api-gateway-node, auth-service]
@@ -68,6 +86,21 @@ jobs:
       - name: Syntax check
         run: node -c index.js
         working-directory: services/${{ matrix.service }}
+      - name: Start gateway for integration test
+        if: matrix.service == 'api-gateway-node'
+        run: node index.js > /tmp/gateway.log 2>&1 & echo $! > /tmp/gateway.pid
+        working-directory: services/${{ matrix.service }}
+      - name: Wait for gateway
+        if: matrix.service == 'api-gateway-node'
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health; then
+              echo "Gateway is up"
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:8080/health
       - name: Run unit tests
         run: npm test
         working-directory: services/${{ matrix.service }}
@@ -186,7 +219,6 @@ jobs:
         if: hashFiles(format('services/{0}/test_*.py', matrix.service)) != '' || hashFiles(format('services/{0}/tests/**', matrix.service)) != ''
         run: pytest -v
         working-directory: services/${{ matrix.service }}
-        continue-on-error: true
 
   java-services-check:
     name: Java Services CI

@@ -18,6 +18,7 @@ from atlas_observability import (
 )
 
 from crud import (
+    MassAssignmentError,
     create_event_subscription,
     create_integration_config,
     create_webhook,
@@ -109,6 +110,12 @@ async def lifespan(app: FastAPI):
     bg_thread.start()
 
     yield
+
+    try:
+        from webhook_engine import close_all_clients
+        await close_all_clients()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -234,7 +241,10 @@ async def create_integration_webhook(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    return create_webhook(db, x_tenant_id, payload.model_dump())
+    try:
+        return create_webhook(db, x_tenant_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/v1/integration/webhooks/{webhook_id}", response_model=WebhookResponse, tags=["Webhooks"])
@@ -256,7 +266,10 @@ async def update_integration_webhook(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    wh = update_webhook(db, webhook_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    try:
+        wh = update_webhook(db, webhook_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook not found")
     return wh
@@ -306,7 +319,10 @@ async def create_integration_subscription(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    return create_event_subscription(db, x_tenant_id, payload.model_dump())
+    try:
+        return create_event_subscription(db, x_tenant_id, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/v1/integration/subscriptions/{sub_id}", response_model=EventSubscriptionResponse, tags=["Event Subscriptions"])
@@ -328,7 +344,10 @@ async def update_integration_subscription(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    sub = update_event_subscription(db, sub_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    try:
+        sub = update_event_subscription(db, sub_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
     return sub
@@ -387,6 +406,8 @@ async def create_integration_config_endpoint(
 ):
     try:
         return create_integration_config(db, x_tenant_id, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if "unique" in str(e).lower():
             raise HTTPException(status_code=409, detail="Config key already exists")
@@ -412,7 +433,10 @@ async def update_integration_config_endpoint(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    config = update_integration_config(db, x_tenant_id, key, payload.model_dump())
+    try:
+        config = update_integration_config(db, x_tenant_id, key, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
     return config

@@ -621,6 +621,8 @@ const PUBLIC_PREFIXES = [
   '/health',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/auth/password/reset-request',
+  '/api/auth/password/reset',
   '/api/auth/passwordless/request',
   '/api/auth/passwordless/verify',
   '/api/auth/saml/acs',
@@ -1215,92 +1217,105 @@ async function drainAuditRetryQueue() {
 setInterval(drainAuditRetryQueue, 5000);
 setTimeout(drainAuditRetryQueue, 5000);
 
-const server = app.listen(PORT, () => {
-  console.log(`API Gateway listening on port ${PORT}`);
-});
-
-server.on('upgrade', (req, socket, head) => {
-  const parsedUrl = new URL(req.url, 'http://localhost');
-  const pathname = parsedUrl.pathname;
-  const isWs = isWsPath(pathname);
-  if (isWs) {
-    const token = parsedUrl.searchParams.get('token');
-    if (!token) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    try {
-      const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
-      if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      const internalPayload = {
-        user_id: payload.id || payload.sub,
-        user_role: payload.role || 'employee',
-        tenant_id: payload.tenant_id || 'default',
-        exp: Math.floor(Date.now() / 1000) + 5
-      };
-      const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET, { algorithm: 'HS256' });
-      req.headers['x-internal-auth'] = internalToken;
-    } catch {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const isLive = pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/');
-    let target;
-    if (isLive) {
-      target = new URL(services.live);
-      // /api/live/ws/{channel} -> /api/v1/live/ws/{channel}
-      target.pathname = pathname.replace(/^\/api\/live/, '/api/v1/live');
-      target.search = parsedUrl.search;
-    } else {
-      target = new URL(services.notification);
-      target.pathname = '/ws';
-      target.search = parsedUrl.search;
-    }
-    const proxyReq = http.request(target.toString(), { method: 'GET', headers: req.headers });
-    proxyReq.on('upgrade', (proxyRes, proxySocket) => {
-      socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
-        'Upgrade: websocket\r\n' +
-        'Connection: Upgrade\r\n' +
-        'Sec-WebSocket-Accept: ' + proxyRes.headers['sec-websocket-accept'] + '\r\n' +
-        '\r\n');
-      socket.pipe(proxySocket).pipe(socket);
-    });
-    proxyReq.on('error', () => socket.destroy());
-    proxyReq.end();
-  } else {
-    socket.destroy();
-  }
-});
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'API Gateway is running' });
 });
 
 app.get('/metrics', async (req, res) => {
-	res.set('Content-Type', promClient.register.contentType);
-	res.end(await promClient.register.metrics());
+  res.set('Content-Type', promClient.register.contentType);
+  res.end(await promClient.register.metrics());
 });
 
 function globalErrorHandler(err, req, res, _next) {
-	console.error('Unhandled error:', err.message, err.stack);
-	const status = err.status || err.statusCode || 500;
-	res.status(status).json({ error: 'Internal server error' });
+  console.error('Unhandled error:', err.message, err.stack);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({ error: 'Internal server error' });
 }
 app.use(globalErrorHandler);
 
-process.on('SIGTERM', () => {
-	console.log('SIGTERM received, shutting down gracefully...');
-	server.close(() => process.exit(0));
-});
+// Export middleware and services for testing
+module.exports = {
+  app,
+  csrfMiddleware,
+  rbacMiddleware,
+  services,
+  authMiddleware,
+  isPublicOrAuthPath,
+  isPublicPath,
+};
 
-process.on('SIGINT', () => {
-	console.log('SIGINT received, shutting down gracefully...');
-	server.close(() => process.exit(0));
-});
+if (require.main === module) {
+  const server = app.listen(PORT, () => {
+    console.log(`API Gateway listening on port ${PORT}`);
+  });
+
+  server.on('upgrade', (req, socket, head) => {
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const pathname = parsedUrl.pathname;
+    const isWs = isWsPath(pathname);
+    if (isWs) {
+      const token = parsedUrl.searchParams.get('token');
+      if (!token) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      try {
+        const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] });
+        if (payload.purpose === 'mfa_challenge' || payload.aud === 'mfa-challenge') {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const internalPayload = {
+          user_id: payload.id || payload.sub,
+          user_role: payload.role || 'employee',
+          tenant_id: payload.tenant_id || 'default',
+          exp: Math.floor(Date.now() / 1000) + 5
+        };
+        const internalToken = jwt.sign(internalPayload, INTERNAL_JWT_SECRET, { algorithm: 'HS256' });
+        req.headers['x-internal-auth'] = internalToken;
+      } catch {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      const isLive = pathname === '/api/live/ws' || pathname.startsWith('/api/live/ws/');
+      let target;
+      if (isLive) {
+        target = new URL(services.live);
+        target.pathname = pathname.replace(/^\/api\/live/, '/api/v1/live');
+        target.search = parsedUrl.search;
+      } else {
+        target = new URL(services.notification);
+        target.pathname = '/ws';
+        target.search = parsedUrl.search;
+      }
+      const proxyReq = http.request(target.toString(), { method: 'GET', headers: req.headers });
+      proxyReq.on('upgrade', (proxyRes, proxySocket) => {
+        socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: ' + proxyRes.headers['sec-websocket-accept'] + '\r\n' +
+          '\r\n');
+        socket.pipe(proxySocket).pipe(socket);
+      });
+      proxyReq.on('error', () => socket.destroy());
+      proxyReq.end();
+    } else {
+      socket.destroy();
+    }
+  });
+
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully...');
+    server.close(() => process.exit(0));
+  });
+
+  process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully...');
+    server.close(() => process.exit(0));
+  });
+}
