@@ -1,3 +1,4 @@
+import logging
 import re
 import time
 
@@ -5,6 +6,8 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, REGIST
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
+logger = logging.getLogger(__name__)
 
 PATH_PARAM_PATTERN = re.compile(r"/[0-9a-fA-F-]{36}|/\d+")
 
@@ -50,6 +53,7 @@ class AtlasMetricsMiddleware(BaseHTTPMiddleware):
             REQUESTS_IN_PROGRESS.labels(method=method, path=path).dec()
             REQUEST_COUNT.labels(method=method, path=path, status_code=500).inc()
             REQUEST_DURATION.labels(method=method, path=path, status_code=500).observe(duration)
+            logger.exception("metrics.request_failed", extra={"method": method, "path": path})
             raise
 
         duration = time.monotonic() - start

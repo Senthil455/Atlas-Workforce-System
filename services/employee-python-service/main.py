@@ -102,8 +102,10 @@ async def lifespan(app: FastAPI):
         await employees_collection.create_index([("tenant_id", 1), ("name", 1)])
         await employees_collection.create_index([("tenant_id", 1), ("department", 1), ("position", 1)])
         log_event("info", "indexes.created")
-    except Exception as e:
-        log_event("warning", "indexes.failed", error=str(e))
+    except pymongo.errors.PyMongoError as e:
+        log_event("warning", "indexes.failed", error=str(e), error_type=type(e).__name__)
+    except Exception:
+        logger.exception("indexes.failed_unexpected")
     yield
     client.close()
     log_event("info", "service.stopped")
@@ -141,7 +143,11 @@ async def internal_auth_middleware(request: Request, call_next):
         request.state.user_role = claims.get("user_role", "employee")
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        log_event("warning", "auth.unexpected_claims_shape", error=str(e), error_type=type(e).__name__)
+        return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
     except Exception:
+        logger.exception("auth.middleware_unexpected_error")
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
@@ -206,7 +212,7 @@ def _publish_delete_event_sync(email: str, tenant_id: str):
         connection.close()
         log_event("info", "employee.delete.published", email=email, tenant_id=tenant_id)
     except Exception as e:
-        log_event("error", "employee.delete.publish.failed", email=email, tenant_id=tenant_id, error=str(e))
+        log_event("error", "employee.delete.publish.failed", email=email, tenant_id=tenant_id, error=str(e), error_type=type(e).__name__)
 
 
 # ------------------------------------------------
@@ -273,7 +279,7 @@ async def health_check():
     try:
         await client.admin.command("ping")
         return {"status": "Employee Service is running", "database": "connected"}
-    except Exception:
+    except pymongo.errors.PyMongoError:
         return {
             "status": "Employee Service is running",
             "database": "disconnected",

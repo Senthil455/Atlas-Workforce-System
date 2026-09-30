@@ -1,6 +1,9 @@
+import logging
 import os
 import uuid
 from typing import Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {'.pdf', '.doc', '.docx', '.txt', '.rtf'}
 ALLOWED_MIME_TYPES = {
@@ -36,8 +39,9 @@ def validate_mime_type(file_bytes: bytes) -> bool:
         text = file_bytes.decode('utf-8', errors='ignore')
         if text.isprintable() or '\n' in text or '\r' in text:
             return 'text/plain' in ALLOWED_MIME_TYPES
-    except Exception:
-        pass
+    except (UnicodeError, ValueError) as e:
+        logger.warning("file.mime_text_check_failed", extra={"error": str(e)})
+        return False
     return False
 
 

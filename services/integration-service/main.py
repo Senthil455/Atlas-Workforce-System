@@ -227,8 +227,8 @@ async def internal_auth_middleware(request: Request, call_next):
                 if "tenant_id" in params:
                     params["tenant_id"] = [request.state.tenant_id]
                     request.scope["query_string"] = urlencode(params, doseq=True).encode()
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError, UnicodeError) as e:
+            logger.warning("auth.tenant_scope_rewrite_failed", extra={"error": str(e)})
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
     except Exception as e:

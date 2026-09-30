@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from sqlalchemy.exc import SQLAlchemyError
 import logging
 
 logger = logging.getLogger("security-service")
@@ -551,7 +552,7 @@ def rotate_encryption_key(db: Session, key_id_str: str, new_data: dict) -> dict:
     db.add(new_key)
     try:
         db.commit()
-    except Exception:
+    except SQLAlchemyError:
         db.rollback()
         raise
     db.refresh(new_key)

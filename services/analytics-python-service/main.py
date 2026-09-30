@@ -128,11 +128,15 @@ async def internal_auth_middleware(request: Request, call_next):
                 if "tenant_id" in params:
                     params["tenant_id"] = [request.state.tenant_id]
                     request.scope["query_string"] = urlencode(params, doseq=True).encode()
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError, UnicodeError) as e:
+            logger.warning("auth.tenant_scope_rewrite_failed", extra={"error": str(e)})
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except (ValueError, KeyError, AttributeError, TypeError, UnicodeError) as e:
+        logger.warning("auth.unexpected_claims_shape", extra={"error": str(e), "error_type": type(e).__name__})
+        return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
     except Exception:
+        logger.exception("auth.middleware_unexpected_error")
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
@@ -149,8 +153,8 @@ DATABASE_URL = os.environ.get(
 
 try:
     engine = create_engine(DATABASE_URL)
-except Exception as e:
-    logger.error("analytics.engine_creation_failed", extra={"error": str(e)})
+except Exception:
+    logger.exception("analytics.engine_creation_failed")
     engine = None
 
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -205,8 +209,17 @@ def get_department_analytics(x_tenant_id: str = Header("default", alias="X-Tenan
             {"department": dept, "headcount": count}
             for dept, count in sorted(dept_counts.items(), key=lambda x: -x[1])
         ]
-    except Exception as e:
-        logger.warning("analytics.department_analytics_failed", extra={"error": str(e), "tenant_id": x_tenant_id})
+    except requests.Timeout as e:
+        logger.warning("analytics.department_analytics_timeout", extra={"error": str(e), "tenant_id": x_tenant_id})
+        raise HTTPException(status_code=504, detail="Employee service timed out")
+    except requests.RequestException as e:
+        logger.warning("analytics.department_analytics_unavailable", extra={"error": str(e), "tenant_id": x_tenant_id})
+        raise HTTPException(status_code=502, detail="Employee service unavailable")
+    except (ValueError, KeyError, AttributeError, TypeError) as e:
+        logger.warning("analytics.department_analytics_bad_payload", extra={"error": str(e), "tenant_id": x_tenant_id})
+        raise HTTPException(status_code=500, detail="Failed to retrieve department analytics")
+    except Exception:
+        logger.exception("analytics.department_analytics_failed", extra={"tenant_id": x_tenant_id})
         raise HTTPException(status_code=500, detail="Failed to retrieve department analytics")
 
 
@@ -235,6 +248,7 @@ def get_payroll_analytics(x_tenant_id: str = Header("default", alias="X-Tenant-I
         payroll_cache_timestamp[cache_key] = now
         return result
     except Exception:
+        logger.exception("analytics.payroll_failed", extra={"tenant_id": x_tenant_id})
         return []
 
 
@@ -292,8 +306,13 @@ def get_ai_insights(x_tenant_id: str = Header("default", alias="X-Tenant-Id")):
             ],
         )
         return {"insight": response.choices[0].message.content}
-    except Exception as e:
-        logger.warning("analytics.ai_insights_failed", extra={"error": str(e), "tenant_id": x_tenant_id})
+    except HTTPException:
+        raise
+    except (TimeoutError, ConnectionError) as e:
+        logger.warning("analytics.ai_insights_unavailable", extra={"error": str(e), "tenant_id": x_tenant_id})
+        raise HTTPException(status_code=502, detail="AI provider unavailable")
+    except Exception:
+        logger.exception("analytics.ai_insights_failed", extra={"tenant_id": x_tenant_id})
         raise HTTPException(status_code=500, detail="Failed to generate AI insights")
 
 
@@ -732,8 +751,9 @@ def verify_payroll_consistency(
                         cin = pd.to_datetime(a["clock_in"])
                         cout = pd.to_datetime(a["clock_out"])
                         total_hours += (cout - cin).total_seconds() / 3600
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.warning("payroll.verify_row_skipped",
+                            extra={"error": str(e), "employee_id": emp_id, "period": period})
             discrepancies.append({
                 "employee_id": emp_id,
                 "period": period,
@@ -751,8 +771,10 @@ def verify_payroll_consistency(
             "discrepancies": discrepancies,
             "verified_at": str(pd.Timestamp.now()),
         }
-    except Exception as e:
-        logger.warning("payroll.verify_failed", extra={"error": str(e), "period": period, "tenant_id": x_tenant_id})
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("payroll.verify_failed", extra={"period": period, "tenant_id": x_tenant_id})
         raise HTTPException(status_code=500, detail="Failed to verify payroll consistency")
 
 
@@ -820,8 +842,10 @@ def payroll_processed_consumer():
             logger.info(
                 "payroll.processed.cache_invalidated",
                 extra={"tenant_id": tenant_id, "routing_key": routing_key})
-        except Exception as e:
-            logger.error("payroll.processed.error", extra={"error": str(e)})
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as e:
+            logger.warning("payroll.processed.bad_message", extra={"error": str(e), "error_type": type(e).__name__})
+        except Exception:
+            logger.exception("payroll.processed.error")
         finally:
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -837,8 +861,8 @@ def payroll_processed_consumer():
             channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
             logger.info("Started listening for payroll.processed events on live_exchange")
             channel.start_consuming()
-        except Exception as e:
-            logger.error("RabbitMQ connection error in payroll consumer", extra={"error": str(e)})
+        except Exception:
+            logger.exception("RabbitMQ connection error in payroll consumer")
             time.sleep(5)
 
 
@@ -853,8 +877,10 @@ def employee_deletion_consumer():
                     "employee.deleted.cascade",
                     extra={"email": email, "tenant_id": tenant_id,
                            "action": "cleanup_derived_data"})
-        except Exception as e:
-            logger.error("employee.deleted.error", extra={"error": str(e)})
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as e:
+            logger.warning("employee.deleted.bad_message", extra={"error": str(e), "error_type": type(e).__name__})
+        except Exception:
+            logger.exception("employee.deleted.error")
         finally:
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -870,8 +896,8 @@ def employee_deletion_consumer():
             channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
             logger.info("Started listening for employee.deleted events")
             channel.start_consuming()
-        except Exception as e:
-            logger.error("RabbitMQ connection error in analytics consumer", extra={"error": str(e)})
+        except Exception:
+            logger.exception("RabbitMQ connection error in analytics consumer")
             time.sleep(5)
 
 
