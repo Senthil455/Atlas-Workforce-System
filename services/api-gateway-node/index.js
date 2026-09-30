@@ -289,6 +289,33 @@ const sensitiveLimiter = rateLimit({
   }),
 });
 
+// Public career portal: anonymous job board browsing, per-IP capped so the
+// public surface cannot be scraped or spammed unchecked (issue #188).
+const careerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many career portal requests, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:career:',
+  }),
+});
+
+// Stricter cap just for submitting applications.
+const careerApplyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many applications submitted, please try again later' },
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: 'rl:career-apply:',
+  }),
+});
+
 app.use('/api/auth', authLimiter);
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth/register', authLimiter);
@@ -297,6 +324,9 @@ app.use('/api/payroll', sensitiveLimiter);
 app.use('/api/compliance', sensitiveLimiter);
 app.use('/api/audit', sensitiveLimiter);
 app.use('/api/billing', sensitiveLimiter);
+
+app.use('/api/ats/career', careerLimiter);
+app.use('/api/ats/career/apply', careerApplyLimiter);
 
 const services = {
   auth: process.env.AUTH_SERVICE_URL || 'http://auth-service:8010',
@@ -636,6 +666,7 @@ const PUBLIC_PREFIXES = [
   '/api/auth/webauthn/authenticate/complete',
   '/api/auth/oauth/login',
   '/api/auth/oauth/callback',
+  '/api/ats/career',
 ];
 
 function isPublicOrAuthPath(path) {

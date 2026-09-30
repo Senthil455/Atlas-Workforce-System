@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from main import get_db
@@ -8,6 +10,9 @@ import crud
 import schemas
 
 router = APIRouter(tags=["career-portal"])
+
+# Anti-abuse: max applications a single candidate email can submit per 24h.
+MAX_APPLICATIONS_PER_EMAIL_PER_DAY = 5
 
 
 @router.get("/career/jobs", summary="Public: List published jobs")
@@ -58,6 +63,7 @@ def public_get_job(job_id: str, db: Session = Depends(get_db)):
 @router.post("/career/apply", response_model=schemas.CandidateResponse,
              status_code=201, summary="Public: Apply to a job")
 def public_apply(
+    request: Request,
     job_id: str = Query(...),
     first_name: str = Query(...),
     last_name: str = Query(...),
@@ -65,9 +71,17 @@ def public_apply(
     phone: Optional[str] = Query(None),
     resume_url: Optional[str] = Query(None),
     cover_letter: Optional[str] = Query(None),
+    # Honeypot field: hidden from the OpenAPI schema, only bots fill it in.
+    # Pretend the application was accepted but store nothing.
+    company_website: Optional[str] = Query(None, include_in_schema=False),
     db: Session = Depends(get_db),
-    x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
 ):
+    if company_website:
+        return JSONResponse(
+            status_code=201,
+            content={"detail": "Application received. We will be in touch."},
+        )
+
     job = db.query(JobModel).filter(
         JobModel.id == job_id,
         JobModel.status == "PUBLISHED",
@@ -75,9 +89,34 @@ def public_apply(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or not published")
 
+    # The tenant always comes from the job posting. A caller-supplied
+    # X-Tenant-Id is ignored, and a mismatched one is rejected outright so a
+    # public application can never be filed into another tenant.
+    tenant_id = job.tenant_id
+    claimed_tenant = request.headers.get("x-tenant-id")
+    if claimed_tenant and claimed_tenant != tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    recent_applications = (
+        db.query(ApplicationModel)
+        .join(CandidateModel, ApplicationModel.candidate_id == CandidateModel.id)
+        .filter(
+            CandidateModel.email == email,
+            CandidateModel.tenant_id == tenant_id,
+            ApplicationModel.created_at >= since,
+        )
+        .count()
+    )
+    if recent_applications >= MAX_APPLICATIONS_PER_EMAIL_PER_DAY:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many applications submitted from this email address. Please try again tomorrow.",
+        )
+
     existing_candidate = db.query(CandidateModel).filter(
         CandidateModel.email == email,
-        CandidateModel.tenant_id == x_tenant_id,
+        CandidateModel.tenant_id == tenant_id,
     ).first()
 
     if existing_candidate:
@@ -91,7 +130,7 @@ def public_apply(
             resume_url=resume_url,
             source="COMPANY_SITE",
         )
-        candidate = crud.create_candidate(db, x_tenant_id, cand_data)
+        candidate = crud.create_candidate(db, tenant_id, cand_data)
         candidate_id = candidate["id"]
 
     existing_app = db.query(ApplicationModel).filter(
@@ -106,8 +145,8 @@ def public_apply(
         candidate_id=str(candidate_id),
         cover_letter=cover_letter,
     )
-    app = crud.create_application(db, x_tenant_id, app_data)
+    app = crud.create_application(db, tenant_id, app_data)
     if not app:
         raise HTTPException(status_code=400, detail="Failed to submit application")
 
-    return crud.get_candidate(db, str(candidate_id), x_tenant_id)
+    return crud.get_candidate(db, str(candidate_id), tenant_id)

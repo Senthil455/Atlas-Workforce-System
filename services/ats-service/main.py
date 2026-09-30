@@ -83,6 +83,13 @@ async def internal_auth_middleware(request: Request, call_next):
     if request.url.path in ("/health", "/metrics"):
         return await call_next(request)
 
+    # Public career-portal surface: external candidates browse jobs and apply
+    # without an internal token (issue #188). The career endpoints derive the
+    # tenant from the job posting and ignore caller-supplied tenant headers
+    # (see routers/career_portal.py), so no authenticated state is needed here.
+    if request.url.path.startswith("/api/v1/career/"):
+        return await call_next(request)
+
     auth_header = request.headers.get("x-internal-auth")
     if not auth_header:
         return JSONResponse(status_code=401, content={"error": "Missing internal authentication"})
@@ -158,6 +165,7 @@ def custom_openapi():
         {"name": "interviews", "description": "Interview scheduling and feedback"},
         {"name": "offers", "description": "Offer letter management"},
         {"name": "analytics", "description": "ATS pipeline analytics"},
+        {"name": "career-portal", "description": "Public career site: browse published jobs and apply (no auth required)"},
         {"name": "health", "description": "Service health check"},
     ]
     app.openapi_schema = openapi_schema
