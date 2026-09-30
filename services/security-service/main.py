@@ -17,6 +17,7 @@ from atlas_observability import (
 )
 
 from crud import (
+    MassAssignmentError,
     add_session_event, approve_privileged_access, assess_risk,
     check_data_residency, classify_resource, create_ca_policy,
     create_data_classification, create_data_residency, create_dlp_policy,
@@ -33,16 +34,16 @@ from crud import (
 )
 from models import Base, PrivilegedAccess
 from schemas import (
-    CAPaginated, ConditionalAccessCreate, ConditionalAccessResponse,
+    CAPaginated, ConditionalAccessCreate, ConditionalAccessResponse, ConditionalAccessUpdate,
     DataClassificationCreate, DataClassificationResponse,
     DataResidencyCreate, DataResidencyResponse, DLPPolicyCreate,
-    DLPPolicyResponse, DLPIncidentResponse, DLPPaginated,
+    DLPPolicyResponse, DLPIncidentCreate, DLPIncidentResponse, DLPPaginated,
     EncryptionKeyCreate, EncryptionKeyResponse,
     HealthResponse, PrivilegedAccessRequest, PrivilegedAccessResponse,
     PrivilegedRoleCreate, PrivilegedRoleResponse,
     RiskAssessmentRequest, RiskAssessmentResponse, RiskPaginated,
-    SecurityDashboard, SessionRecordingEvent, SessionRecordingResponse,
-    ZeroTrustPolicyCreate, ZeroTrustPolicyResponse, ZTAPaginated,
+    SecurityDashboard, SessionRecordingCreate, SessionRecordingEvent, SessionRecordingResponse,
+    ZeroTrustPolicyCreate, ZeroTrustPolicyResponse, ZeroTrustPolicyUpdate, ZTAPaginated,
 )
 
 load_dotenv()
@@ -88,6 +89,12 @@ def resolve_tenant(query_tenant: Optional[str], verified_tenant: str) -> str:
     if query_tenant is not None and str(query_tenant) != verified_tenant:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
     return verified_tenant
+
+
+def check_body_tenant(request: Request, body_tenant: Optional[str]) -> None:
+    context_tenant = getattr(request.state, "tenant_id", None)
+    if context_tenant and body_tenant and body_tenant != context_tenant:
+        raise HTTPException(status_code=403, detail="Tenant mismatch between context and body")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -213,7 +220,10 @@ async def list_zt(request: Request, tenant_id: Optional[str] = Query(None), enab
 
 @app.post("/api/v1/security/zero-trust", response_model=ZeroTrustPolicyResponse, status_code=201, tags=["Zero Trust"])
 async def create_zt(payload: ZeroTrustPolicyCreate, db: Session = Depends(get_db)):
-    return create_zt_policy(db, payload.model_dump())
+    try:
+        return create_zt_policy(db, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/v1/security/zero-trust/{policy_id}", response_model=ZeroTrustPolicyResponse, tags=["Zero Trust"])
 async def get_zt(policy_id: uuid.UUID, request: Request, verified_tenant: str = Depends(get_tenant), db: Session = Depends(get_db)):
@@ -225,8 +235,11 @@ async def get_zt(policy_id: uuid.UUID, request: Request, verified_tenant: str = 
     return policy
 
 @app.put("/api/v1/security/zero-trust/{policy_id}", response_model=ZeroTrustPolicyResponse, tags=["Zero Trust"])
-async def update_zt(policy_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
-    updated = update_zt_policy(db, policy_id, payload)
+async def update_zt(policy_id: uuid.UUID, payload: ZeroTrustPolicyUpdate, db: Session = Depends(get_db)):
+    try:
+        updated = update_zt_policy(db, policy_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=404, detail="Policy not found")
     return updated
@@ -254,7 +267,10 @@ async def list_ca(request: Request, tenant_id: Optional[str] = Query(None), enab
 
 @app.post("/api/v1/security/conditional-access", response_model=ConditionalAccessResponse, status_code=201, tags=["Conditional Access"])
 async def create_ca(payload: ConditionalAccessCreate, db: Session = Depends(get_db)):
-    return create_ca_policy(db, payload.model_dump())
+    try:
+        return create_ca_policy(db, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/v1/security/conditional-access/{policy_id}", response_model=ConditionalAccessResponse, tags=["Conditional Access"])
 async def get_ca(policy_id: uuid.UUID, request: Request, verified_tenant: str = Depends(get_tenant), db: Session = Depends(get_db)):
@@ -266,8 +282,11 @@ async def get_ca(policy_id: uuid.UUID, request: Request, verified_tenant: str = 
     return policy
 
 @app.put("/api/v1/security/conditional-access/{policy_id}", response_model=ConditionalAccessResponse, tags=["Conditional Access"])
-async def update_ca(policy_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
-    updated = update_ca_policy(db, policy_id, payload)
+async def update_ca(policy_id: uuid.UUID, payload: ConditionalAccessUpdate, db: Session = Depends(get_db)):
+    try:
+        updated = update_ca_policy(db, policy_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=404, detail="Policy not found")
     return updated
@@ -291,8 +310,12 @@ async def evaluate_all_ca(context: dict, request: Request, tenant_id: Optional[s
 # ── Risk-Based Authentication ───────────────────────────────────────────────
 
 @app.post("/api/v1/security/risk/assess", response_model=RiskAssessmentResponse, tags=["Risk Assessment"])
-async def assess_risk_endpoint(payload: RiskAssessmentRequest, db: Session = Depends(get_db)):
-    result = assess_risk(db, payload.model_dump())
+async def assess_risk_endpoint(payload: RiskAssessmentRequest, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        result = assess_risk(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return result
 
 @app.get("/api/v1/security/risk/assessments", response_model=RiskPaginated, tags=["Risk Assessment"])
@@ -319,14 +342,18 @@ async def get_pam_role(role_id: uuid.UUID, request: Request, verified_tenant: st
     return role
 
 @app.post("/api/v1/security/pam/requests", response_model=PrivilegedAccessResponse, tags=["PAM"])
-async def request_pam(payload: PrivilegedAccessRequest, db: Session = Depends(get_db)):
+async def request_pam(payload: PrivilegedAccessRequest, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
     role = get_privileged_role(db, payload.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     if role.allowed_requester_roles and payload.requester_role not in role.allowed_requester_roles:
         logger.warning("pam.role_escalation_denied", extra={"user_id": payload.user_id, "role_id": str(payload.role_id), "requester_role": payload.requester_role})
         raise HTTPException(status_code=403, detail="Your role is not authorized to request this privileged access")
-    return request_privileged_access(db, payload.model_dump())
+    try:
+        return request_privileged_access(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/v1/security/pam/requests", tags=["PAM"])
 async def list_pam_requests(request: Request, tenant_id: Optional[str] = Query(None), user_id: Optional[str] = Query(None), status: Optional[str] = Query(None), page: int = Query(1, ge=1), page_size: int = Depends(clamp_page_size), verified_tenant: str = Depends(get_tenant), db: Session = Depends(get_db)):
@@ -398,8 +425,12 @@ async def list_dlp_incidents_endpoint(request: Request, tenant_id: Optional[str]
     return list_dlp_incidents(db, resolve_tenant(tenant_id, verified_tenant), status, severity, page, page_size)
 
 @app.post("/api/v1/security/dlp/incidents", response_model=DLPIncidentResponse, status_code=201, tags=["DLP"])
-async def report_dlp_incident_endpoint(payload: dict, db: Session = Depends(get_db)):
-    return report_dlp_incident(db, payload)
+async def report_dlp_incident_endpoint(payload: DLPIncidentCreate, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return report_dlp_incident(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.put("/api/v1/security/dlp/incidents/{incident_id}/status", response_model=DLPIncidentResponse, tags=["DLP"])
 async def update_dlp_incident_endpoint(incident_id: uuid.UUID, status: str = Query(...), db: Session = Depends(get_db)):
@@ -420,6 +451,10 @@ async def create_key(payload: EncryptionKeyCreate, db: Session = Depends(get_db)
 
 @app.post("/api/v1/security/encryption-keys/{key_id}/rotate", tags=["Encryption Keys"])
 async def rotate_key(key_id: str, payload: dict, db: Session = Depends(get_db)):
+    allowed_rotate_fields = {"algorithm", "purpose", "expires_at", "key_id"}
+    unknown = [k for k in payload.keys() if k not in allowed_rotate_fields]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
     result = rotate_encryption_key(db, key_id, payload)
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
@@ -449,8 +484,12 @@ async def check_residency(policy_id: uuid.UUID, target_region: str = Query(...),
 # ── Session Recording ───────────────────────────────────────────────────────
 
 @app.post("/api/v1/security/session-recordings/start", response_model=SessionRecordingResponse, status_code=201, tags=["Session Recording"])
-async def start_recording(payload: dict, db: Session = Depends(get_db)):
-    return start_session_recording(db, payload)
+async def start_recording(payload: SessionRecordingCreate, request: Request, db: Session = Depends(get_db)):
+    check_body_tenant(request, payload.tenant_id)
+    try:
+        return start_session_recording(db, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/v1/security/session-recordings/{recording_id}/stop", response_model=SessionRecordingResponse, tags=["Session Recording"])
 async def stop_recording(recording_id: uuid.UUID, db: Session = Depends(get_db)):

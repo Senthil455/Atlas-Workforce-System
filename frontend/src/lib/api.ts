@@ -170,6 +170,10 @@ export const authApi = {
   },
   logout: () =>
     api.post("/auth/logout"),
+  requestPasswordReset: (email: string) =>
+    api.post("/auth/password/reset-request", { email }),
+  resetPassword: (token: string, password: string) =>
+    api.post("/auth/password/reset", { token, password }),
 };
 
 export const employeeApi = {

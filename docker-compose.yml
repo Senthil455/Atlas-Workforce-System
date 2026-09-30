@@ -131,6 +131,10 @@ services:
       - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - WEBHOOK_ALLOW_HTTP=${WEBHOOK_ALLOW_HTTP:-false}
+      - WEBHOOK_ALLOW_PRIVATE_IPS=${WEBHOOK_ALLOW_PRIVATE_IPS:-false}
+      - WEBHOOK_ALLOWED_HOSTS=${WEBHOOK_ALLOWED_HOSTS:-}
+      - WEBHOOK_BLOCKED_HOSTS=${WEBHOOK_BLOCKED_HOSTS:-}
     networks:
       - atlas-network
     depends_on:
@@ -208,6 +212,7 @@ services:
       - NODE_ENV=${NODE_ENV:-production}
       - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - SCIM_API_KEY=${SCIM_API_KEY:-change-scim-api-key-in-production}
+      - SCIM_API_KEYS=${SCIM_API_KEYS:-}
       - SAML_IDP_SSO_URL=${SAML_IDP_SSO_URL:-https://idp.example.com/sso}
       - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID:-https://idp.example.com/metadata}
       - SAML_IDP_CERT=${SAML_IDP_CERT:-}

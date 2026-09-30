@@ -21,7 +21,7 @@ from crud import (
     update_delivery_log,
     update_webhook,
 )
-from webhook_engine import deliver_webhook, send_audit_event
+from webhook_engine import close_client, deliver_webhook, send_audit_event
 
 logger = logging.getLogger("event-router")
 
@@ -125,6 +125,22 @@ def route_event(event_type: str, tenant_id: str, payload: dict, source_service: 
         db.close()
 
 
+def _mark_delivery_failed(log_id, error):
+    db = get_db()
+    if not db:
+        return
+    try:
+        update_delivery_log(db, log_id, {
+            "status": "FAILED",
+            "status_code": 0,
+            "response_body": f"{type(error).__name__}: {error}"[:5000],
+        })
+    except Exception as e:
+        logger.error("Failed to record delivery failure: %s (%s)", e, type(e).__name__, exc_info=True)
+    finally:
+        db.close()
+
+
 def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers, timeout, tenant_id):
     import asyncio
     loop = asyncio.new_event_loop()
@@ -136,7 +152,19 @@ def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers,
         db = get_db()
         if db:
             try:
-                if 200 <= status_code < 300:
+                if isinstance(response_body, str) and response_body.startswith("Blocked destination:"):
+                    update_delivery_log(db, log_id, {
+                        "status": "FAILED",
+                        "status_code": status_code,
+                        "response_body": response_body,
+                    })
+                elif isinstance(response_body, str) and response_body.startswith("Blocked headers:"):
+                    update_delivery_log(db, log_id, {
+                        "status": "FAILED",
+                        "status_code": status_code,
+                        "response_body": response_body,
+                    })
+                elif 200 <= status_code < 300:
                     update_delivery_log(db, log_id, {
                         "status": "DELIVERED",
                         "status_code": status_code,
@@ -163,8 +191,13 @@ def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers,
             finally:
                 db.close()
     except Exception as e:
-        logger.error(f"Delivery error: {e}")
+        logger.error("Delivery error: %s (%s)", e, type(e).__name__, exc_info=True)
+        _mark_delivery_failed(log_id, e)
     finally:
+        try:
+            loop.run_until_complete(close_client())
+        except Exception as e:
+            logger.warning("Failed to close webhook client: %s (%s)", e, type(e).__name__)
         loop.close()
 
 
