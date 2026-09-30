@@ -10,5 +10,18 @@ RUN mvn clean package -f services/payroll-java-service/pom.xml -DskipTests
 FROM amazoncorretto:17-alpine
 WORKDIR /app
 COPY --from=builder /app/services/payroll-java-service/target/payroll-service-*.jar app.jar
+
+# Run as non-root to match k8s runAsUser 1001 (runAsNonRoot).
+# Writable tmp dir for the JVM, picked up via JAVA_TOOL_OPTIONS.
+RUN addgroup -S -g 1001 appgroup && \
+    adduser -S -u 1001 -G appgroup -h /home/appuser appuser && \
+    mkdir -p /app/tmp && \
+    chown -R appuser:appgroup /app /home/appuser
+
+ENV JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/app/tmp"
+
 EXPOSE 8002
+
+USER appuser
+
 ENTRYPOINT ["java", "-jar", "app.jar"]
