@@ -17,6 +17,7 @@ from atlas_observability import (
 )
 
 from crud import (
+    MassAssignmentError,
     add_session_event, approve_privileged_access, assess_risk,
     check_data_residency, classify_resource, create_ca_policy,
     create_data_classification, create_data_residency, create_dlp_policy,
@@ -33,16 +34,16 @@ from crud import (
 )
 from models import Base, PrivilegedAccess
 from schemas import (
-    CAPaginated, ConditionalAccessCreate, ConditionalAccessResponse,
+    CAPaginated, ConditionalAccessCreate, ConditionalAccessResponse, ConditionalAccessUpdate,
     DataClassificationCreate, DataClassificationResponse,
     DataResidencyCreate, DataResidencyResponse, DLPPolicyCreate,
-    DLPPolicyResponse, DLPIncidentResponse, DLPPaginated,
+    DLPPolicyResponse, DLPIncidentCreate, DLPIncidentResponse, DLPPaginated,
     EncryptionKeyCreate, EncryptionKeyResponse,
     HealthResponse, PrivilegedAccessRequest, PrivilegedAccessResponse,
     PrivilegedRoleCreate, PrivilegedRoleResponse,
     RiskAssessmentRequest, RiskAssessmentResponse, RiskPaginated,
-    SecurityDashboard, SessionRecordingEvent, SessionRecordingResponse,
-    ZeroTrustPolicyCreate, ZeroTrustPolicyResponse, ZTAPaginated,
+    SecurityDashboard, SessionRecordingCreate, SessionRecordingEvent, SessionRecordingResponse,
+    ZeroTrustPolicyCreate, ZeroTrustPolicyResponse, ZeroTrustPolicyUpdate, ZTAPaginated,
 )
 
 load_dotenv()
@@ -181,7 +182,10 @@ async def list_zt(tenant_id: Optional[str] = Query(None), enabled: Optional[bool
 
 @app.post("/api/v1/security/zero-trust", response_model=ZeroTrustPolicyResponse, status_code=201, tags=["Zero Trust"])
 async def create_zt(payload: ZeroTrustPolicyCreate, db: Session = Depends(get_db)):
-    return create_zt_policy(db, payload.model_dump())
+    try:
+        return create_zt_policy(db, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/v1/security/zero-trust/{policy_id}", response_model=ZeroTrustPolicyResponse, tags=["Zero Trust"])
 async def get_zt(policy_id: uuid.UUID, db: Session = Depends(get_db)):
@@ -191,8 +195,11 @@ async def get_zt(policy_id: uuid.UUID, db: Session = Depends(get_db)):
     return policy
 
 @app.put("/api/v1/security/zero-trust/{policy_id}", response_model=ZeroTrustPolicyResponse, tags=["Zero Trust"])
-async def update_zt(policy_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
-    updated = update_zt_policy(db, policy_id, payload)
+async def update_zt(policy_id: uuid.UUID, payload: ZeroTrustPolicyUpdate, db: Session = Depends(get_db)):
+    try:
+        updated = update_zt_policy(db, policy_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=404, detail="Policy not found")
     return updated
@@ -218,7 +225,10 @@ async def list_ca(tenant_id: Optional[str] = Query(None), enabled: Optional[bool
 
 @app.post("/api/v1/security/conditional-access", response_model=ConditionalAccessResponse, status_code=201, tags=["Conditional Access"])
 async def create_ca(payload: ConditionalAccessCreate, db: Session = Depends(get_db)):
-    return create_ca_policy(db, payload.model_dump())
+    try:
+        return create_ca_policy(db, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/v1/security/conditional-access/{policy_id}", response_model=ConditionalAccessResponse, tags=["Conditional Access"])
 async def get_ca(policy_id: uuid.UUID, db: Session = Depends(get_db)):
@@ -228,8 +238,11 @@ async def get_ca(policy_id: uuid.UUID, db: Session = Depends(get_db)):
     return policy
 
 @app.put("/api/v1/security/conditional-access/{policy_id}", response_model=ConditionalAccessResponse, tags=["Conditional Access"])
-async def update_ca(policy_id: uuid.UUID, payload: dict, db: Session = Depends(get_db)):
-    updated = update_ca_policy(db, policy_id, payload)
+async def update_ca(policy_id: uuid.UUID, payload: ConditionalAccessUpdate, db: Session = Depends(get_db)):
+    try:
+        updated = update_ca_policy(db, policy_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=404, detail="Policy not found")
     return updated
@@ -354,8 +367,11 @@ async def list_dlp_incidents_endpoint(tenant_id: Optional[str] = Query(None), st
     return list_dlp_incidents(db, tenant_id, status, severity, page, page_size)
 
 @app.post("/api/v1/security/dlp/incidents", response_model=DLPIncidentResponse, status_code=201, tags=["DLP"])
-async def report_dlp_incident_endpoint(payload: dict, db: Session = Depends(get_db)):
-    return report_dlp_incident(db, payload)
+async def report_dlp_incident_endpoint(payload: DLPIncidentCreate, db: Session = Depends(get_db)):
+    try:
+        return report_dlp_incident(db, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.put("/api/v1/security/dlp/incidents/{incident_id}/status", response_model=DLPIncidentResponse, tags=["DLP"])
 async def update_dlp_incident_endpoint(incident_id: uuid.UUID, status: str = Query(...), db: Session = Depends(get_db)):
@@ -376,6 +392,10 @@ async def create_key(payload: EncryptionKeyCreate, db: Session = Depends(get_db)
 
 @app.post("/api/v1/security/encryption-keys/{key_id}/rotate", tags=["Encryption Keys"])
 async def rotate_key(key_id: str, payload: dict, db: Session = Depends(get_db)):
+    allowed_rotate_fields = {"algorithm", "purpose", "expires_at", "key_id"}
+    unknown = [k for k in payload.keys() if k not in allowed_rotate_fields]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
     result = rotate_encryption_key(db, key_id, payload)
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
@@ -405,8 +425,11 @@ async def check_residency(policy_id: uuid.UUID, target_region: str = Query(...),
 # ── Session Recording ───────────────────────────────────────────────────────
 
 @app.post("/api/v1/security/session-recordings/start", response_model=SessionRecordingResponse, status_code=201, tags=["Session Recording"])
-async def start_recording(payload: dict, db: Session = Depends(get_db)):
-    return start_session_recording(db, payload)
+async def start_recording(payload: SessionRecordingCreate, db: Session = Depends(get_db)):
+    try:
+        return start_session_recording(db, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/v1/security/session-recordings/{recording_id}/stop", response_model=SessionRecordingResponse, tags=["Session Recording"])
 async def stop_recording(recording_id: uuid.UUID, db: Session = Depends(get_db)):

@@ -26,7 +26,7 @@ function testLoginDoesNotPersistUnknownUsers() {
   const unknownBlock = login.slice(braceOpen, braceClose);
   assert.ok(!unknownBlock.includes('recordFailedAttempt'), 'unknown emails must not write failed_attempts rows');
   assert.ok(unknownBlock.includes("known_user"), 'unknown failures must still increment the metric');
-  assert.ok(login.includes('await recordFailedAttempt(email)'), 'known-user failures must still be recorded');
+  assert.ok(login.includes('await recordFailedAttempt(email)') || login.includes('await recordFailedAttempt(normalizedEmail)'), 'known-user failures must still be recorded');
   console.log('PASS: unknown emails do not create failed_attempts rows');
 }
 
