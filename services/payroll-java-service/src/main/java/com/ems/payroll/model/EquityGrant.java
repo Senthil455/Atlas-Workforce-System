@@ -1,6 +1,7 @@
 package com.ems.payroll.model;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -11,9 +12,12 @@ public class EquityGrant {
     private Long id;
     private String employeeId;
     private String tenantId;
-    private Double shares;
-    private Double strikePrice;
-    private Double fairMarketValue;
+    @Column(precision = 19, scale = 4)
+    private BigDecimal shares;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal strikePrice;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal fairMarketValue;
     private LocalDate grantDate;
     private LocalDate vestingStart;
     private LocalDate vestingEnd;
@@ -31,12 +35,12 @@ public class EquityGrant {
     public void setEmployeeId(String employeeId) { this.employeeId = employeeId; }
     public String getTenantId() { return tenantId; }
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
-    public Double getShares() { return shares; }
-    public void setShares(Double shares) { this.shares = shares; }
-    public Double getStrikePrice() { return strikePrice; }
-    public void setStrikePrice(Double strikePrice) { this.strikePrice = strikePrice; }
-    public Double getFairMarketValue() { return fairMarketValue; }
-    public void setFairMarketValue(Double fairMarketValue) { this.fairMarketValue = fairMarketValue; }
+    public BigDecimal getShares() { return shares; }
+    public void setShares(BigDecimal shares) { this.shares = shares; }
+    public BigDecimal getStrikePrice() { return strikePrice; }
+    public void setStrikePrice(BigDecimal strikePrice) { this.strikePrice = strikePrice; }
+    public BigDecimal getFairMarketValue() { return fairMarketValue; }
+    public void setFairMarketValue(BigDecimal fairMarketValue) { this.fairMarketValue = fairMarketValue; }
     public LocalDate getGrantDate() { return grantDate; }
     public void setGrantDate(LocalDate grantDate) { this.grantDate = grantDate; }
     public LocalDate getVestingStart() { return vestingStart; }

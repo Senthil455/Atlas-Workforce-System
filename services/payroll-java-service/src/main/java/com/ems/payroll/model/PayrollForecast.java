@@ -1,6 +1,7 @@
 package com.ems.payroll.model;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -10,10 +11,14 @@ public class PayrollForecast {
     private Long id;
     private String tenantId;
     private String period;
-    private Double projectedGrossPayroll;
-    private Double projectedNetPayroll;
-    private Double projectedTax;
-    private Double projectedBenefits;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal projectedGrossPayroll;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal projectedNetPayroll;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal projectedTax;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal projectedBenefits;
     private Double confidence;
     @Column(columnDefinition = "TEXT")
     private String factors;
@@ -29,14 +34,14 @@ public class PayrollForecast {
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
     public String getPeriod() { return period; }
     public void setPeriod(String period) { this.period = period; }
-    public Double getProjectedGrossPayroll() { return projectedGrossPayroll; }
-    public void setProjectedGrossPayroll(Double projectedGrossPayroll) { this.projectedGrossPayroll = projectedGrossPayroll; }
-    public Double getProjectedNetPayroll() { return projectedNetPayroll; }
-    public void setProjectedNetPayroll(Double projectedNetPayroll) { this.projectedNetPayroll = projectedNetPayroll; }
-    public Double getProjectedTax() { return projectedTax; }
-    public void setProjectedTax(Double projectedTax) { this.projectedTax = projectedTax; }
-    public Double getProjectedBenefits() { return projectedBenefits; }
-    public void setProjectedBenefits(Double projectedBenefits) { this.projectedBenefits = projectedBenefits; }
+    public BigDecimal getProjectedGrossPayroll() { return projectedGrossPayroll; }
+    public void setProjectedGrossPayroll(BigDecimal projectedGrossPayroll) { this.projectedGrossPayroll = projectedGrossPayroll; }
+    public BigDecimal getProjectedNetPayroll() { return projectedNetPayroll; }
+    public void setProjectedNetPayroll(BigDecimal projectedNetPayroll) { this.projectedNetPayroll = projectedNetPayroll; }
+    public BigDecimal getProjectedTax() { return projectedTax; }
+    public void setProjectedTax(BigDecimal projectedTax) { this.projectedTax = projectedTax; }
+    public BigDecimal getProjectedBenefits() { return projectedBenefits; }
+    public void setProjectedBenefits(BigDecimal projectedBenefits) { this.projectedBenefits = projectedBenefits; }
     public Double getConfidence() { return confidence; }
     public void setConfidence(Double confidence) { this.confidence = confidence; }
     public String getFactors() { return factors; }

@@ -2,10 +2,12 @@ package com.ems.payroll;
 
 import com.atlas.common.security.RequiresRole;
 import com.atlas.common.security.TenantId;
+import com.ems.payroll.util.Money;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -44,9 +46,9 @@ public class PayrollController {
         try {
             String employeeId = (String) request.get("employeeId");
             String period = (String) request.get("period");
-            Double baseSalary = Double.valueOf(request.getOrDefault("baseSalary", "0").toString());
-            Double allowances = Double.valueOf(request.getOrDefault("allowances", "0").toString());
-            Double deductions = Double.valueOf(request.getOrDefault("deductions", "0").toString());
+            BigDecimal baseSalary = Money.of(request.getOrDefault("baseSalary", "0"));
+            BigDecimal allowances = Money.of(request.getOrDefault("allowances", "0"));
+            BigDecimal deductions = Money.of(request.getOrDefault("deductions", "0"));
 
             PayrollRecord record = service.runPayroll(tenantId, employeeId, period, baseSalary, allowances, deductions);
             return ResponseEntity.ok(record);

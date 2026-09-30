@@ -3,6 +3,7 @@ package com.ems.payroll;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -26,15 +27,20 @@ public class PayrollRecord {
     private String period;
 
     @Min(0) @PositiveOrZero
-    private Double baseSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal baseSalary;
     @Min(0) @PositiveOrZero
-    private Double allowances;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal allowances;
     @Min(0) @PositiveOrZero
-    private Double deductions;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal deductions;
     @Min(0) @PositiveOrZero
-    private Double tax;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal tax;
     @Min(0) @PositiveOrZero
-    private Double netSalary;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal netSalary;
 
     private String status;
     private LocalDateTime processedDate;
@@ -49,16 +55,16 @@ public class PayrollRecord {
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
     public String getPeriod() { return period; }
     public void setPeriod(String period) { this.period = period; }
-    public Double getBaseSalary() { return baseSalary; }
-    public void setBaseSalary(Double baseSalary) { this.baseSalary = baseSalary; }
-    public Double getAllowances() { return allowances; }
-    public void setAllowances(Double allowances) { this.allowances = allowances; }
-    public Double getDeductions() { return deductions; }
-    public void setDeductions(Double deductions) { this.deductions = deductions; }
-    public Double getTax() { return tax; }
-    public void setTax(Double tax) { this.tax = tax; }
-    public Double getNetSalary() { return netSalary; }
-    public void setNetSalary(Double netSalary) { this.netSalary = netSalary; }
+    public BigDecimal getBaseSalary() { return baseSalary; }
+    public void setBaseSalary(BigDecimal baseSalary) { this.baseSalary = baseSalary; }
+    public BigDecimal getAllowances() { return allowances; }
+    public void setAllowances(BigDecimal allowances) { this.allowances = allowances; }
+    public BigDecimal getDeductions() { return deductions; }
+    public void setDeductions(BigDecimal deductions) { this.deductions = deductions; }
+    public BigDecimal getTax() { return tax; }
+    public void setTax(BigDecimal tax) { this.tax = tax; }
+    public BigDecimal getNetSalary() { return netSalary; }
+    public void setNetSalary(BigDecimal netSalary) { this.netSalary = netSalary; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public LocalDateTime getProcessedDate() { return processedDate; }

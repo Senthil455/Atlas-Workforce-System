@@ -2,11 +2,13 @@ package com.ems.payroll;
 
 import com.ems.payroll.model.OutboxEvent;
 import com.ems.payroll.repository.OutboxEventRepository;
+import com.ems.payroll.util.Money;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -33,7 +35,7 @@ public class PayrollService {
     }
 
     @Transactional
-    public PayrollRecord runPayroll(String tenantId, String employeeId, String period, Double baseSalary, Double allowances, Double deductions) {
+    public PayrollRecord runPayroll(String tenantId, String employeeId, String period, BigDecimal baseSalary, BigDecimal allowances, BigDecimal deductions) {
         try {
             // Check if payroll already exists for this period
             List<PayrollRecord> existing = repository.findByTenantIdAndEmployeeIdAndPeriod(tenantId, employeeId, period);
@@ -41,9 +43,9 @@ public class PayrollService {
                 throw new IllegalArgumentException("Payroll already processed for this period");
             }
 
-            double grossSalary = baseSalary + allowances - deductions;
-            double tax = calculateTax(grossSalary);
-            double netSalary = grossSalary - tax;
+            BigDecimal grossSalary = Money.subtract(Money.add(baseSalary, allowances), deductions);
+            BigDecimal tax = calculateTax(grossSalary);
+            BigDecimal netSalary = Money.subtract(grossSalary, tax);
 
             PayrollRecord record = new PayrollRecord();
             record.setTenantId(tenantId);
@@ -100,12 +102,24 @@ public class PayrollService {
         }
     }
 
-    private double calculateTax(double grossSalary) {
-        // Simple progressive tax calculation
-        if (grossSalary <= 3000) return 0;
-        if (grossSalary <= 7000) return (grossSalary - 3000) * 0.15;
-        if (grossSalary <= 12000) return (4000 * 0.15) + ((grossSalary - 7000) * 0.25);
-        return (4000 * 0.15) + (5000 * 0.25) + ((grossSalary - 12000) * 0.35);
+    public BigDecimal calculateTax(BigDecimal grossSalary) {
+        // Simple progressive tax calculation, rounded to cents at each bracket.
+        BigDecimal gross = Money.of(grossSalary);
+        BigDecimal threeK = new BigDecimal("3000.00");
+        BigDecimal sevenK = new BigDecimal("7000.00");
+        BigDecimal twelveK = new BigDecimal("12000.00");
+        if (gross.compareTo(threeK) <= 0) return Money.zero();
+        if (gross.compareTo(sevenK) <= 0) return Money.percentOf(gross.subtract(threeK), 0.15);
+        if (gross.compareTo(twelveK) <= 0) {
+            return Money.add(
+                    Money.percentOf(new BigDecimal("4000.00"), 0.15),
+                    Money.percentOf(gross.subtract(sevenK), 0.25));
+        }
+        return Money.add(
+                Money.add(
+                        Money.percentOf(new BigDecimal("4000.00"), 0.15),
+                        Money.percentOf(new BigDecimal("5000.00"), 0.25)),
+                Money.percentOf(gross.subtract(twelveK), 0.35));
     }
 
     private static String toJson(Map<String, Object> payload) {

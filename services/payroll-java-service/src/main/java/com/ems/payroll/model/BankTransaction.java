@@ -1,6 +1,7 @@
 package com.ems.payroll.model;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -11,7 +12,8 @@ public class BankTransaction {
     private String employeeId;
     private String tenantId;
     private Long payrollId;
-    private Double amount;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal amount;
 
     @Convert(converter = EncryptedStringConverter.class)
     private String accountNumber;
@@ -36,8 +38,8 @@ public class BankTransaction {
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
     public Long getPayrollId() { return payrollId; }
     public void setPayrollId(Long payrollId) { this.payrollId = payrollId; }
-    public Double getAmount() { return amount; }
-    public void setAmount(Double amount) { this.amount = amount; }
+    public BigDecimal getAmount() { return amount; }
+    public void setAmount(BigDecimal amount) { this.amount = amount; }
     public String getAccountNumber() { return accountNumber; }
     public void setAccountNumber(String accountNumber) { this.accountNumber = accountNumber; }
     public String getRoutingNumber() { return routingNumber; }

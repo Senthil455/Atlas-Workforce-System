@@ -2,11 +2,13 @@ package com.ems.payroll.service;
 
 import com.ems.payroll.model.*;
 import com.ems.payroll.repository.*;
+import com.ems.payroll.util.Money;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -78,7 +80,7 @@ public class PayrollEnterpriseService {
 
     @Transactional
     public EnhancedPayrollRecord runMultiCountryPayroll(String tenantId, String employeeId, String period,
-                                                         Double baseSalary, Double allowances, Double deductions,
+                                                         BigDecimal baseSalary, BigDecimal allowances, BigDecimal deductions,
                                                          String country, String currency) {
         try {
             List<EnhancedPayrollRecord> existing = payrollRepo.findByTenantIdAndEmployeeIdAndPeriod(tenantId, employeeId, period);
@@ -86,27 +88,27 @@ public class PayrollEnterpriseService {
                 throw new IllegalArgumentException("Payroll already processed for this period");
             }
 
-            Double grossSalary = baseSalary + allowances - deductions;
+            BigDecimal grossSalary = Money.subtract(Money.add(baseSalary, allowances), deductions);
             CountryTaxConfig taxConfig = taxConfigRepo.findByTenantIdAndCountry(tenantId, country)
                     .orElse(null);
 
-            double tax = 0;
-            double socialSecurity = 0;
-            double medicare = 0;
+            BigDecimal tax = Money.zero();
+            BigDecimal socialSecurity = Money.zero();
+            BigDecimal medicare = Money.zero();
 
             if (taxConfig != null) {
                 tax = calculateProgressiveTax(tenantId, country, taxConfig.getTaxYear(), grossSalary);
                 if (taxConfig.getSocialSecurityRate() != null) {
-                    socialSecurity = grossSalary * taxConfig.getSocialSecurityRate();
+                    socialSecurity = Money.percentOf(grossSalary, taxConfig.getSocialSecurityRate());
                 }
                 if (taxConfig.getMedicareRate() != null) {
-                    medicare = grossSalary * taxConfig.getMedicareRate();
+                    medicare = Money.percentOf(grossSalary, taxConfig.getMedicareRate());
                 }
             } else {
                 tax = calculateSimpleTax(grossSalary);
             }
 
-            double netSalary = grossSalary - tax - socialSecurity - medicare;
+            BigDecimal netSalary = Money.subtract(Money.subtract(grossSalary, tax), Money.add(socialSecurity, medicare));
 
             EnhancedPayrollRecord record = new EnhancedPayrollRecord();
             record.setTenantId(tenantId);
@@ -180,29 +182,35 @@ public class PayrollEnterpriseService {
         }
     }
 
-    private double calculateProgressiveTax(String tenantId, String country, String taxYear, double grossSalary) {
+    public BigDecimal calculateProgressiveTax(String tenantId, String country, String taxYear, BigDecimal grossSalary) {
+        BigDecimal gross = Money.of(grossSalary);
         List<TaxBracket> brackets = taxBracketRepo.findByTenantIdAndCountryAndTaxYearOrderByBracketOrder(tenantId, country, taxYear);
         if (brackets.isEmpty()) {
-            return calculateSimpleTax(grossSalary);
+            return calculateSimpleTax(gross);
         }
         // Ensure brackets are processed in order
         brackets.sort(Comparator.comparingInt(b -> b.getBracketOrder() != null ? b.getBracketOrder() : 0));
 
-        double tax = 0;
+        BigDecimal tax = Money.zero();
         for (TaxBracket bracket : brackets) {
-            double minIncome = bracket.getMinIncome() != null ? bracket.getMinIncome() : 0;
-            Double maxIncomeObj = bracket.getMaxIncome();
-            double maxIncome = (maxIncomeObj != null && maxIncomeObj > 0) ? maxIncomeObj : Double.MAX_VALUE;
+            BigDecimal minIncome = Money.of(bracket.getMinIncome());
+            BigDecimal maxIncome = bracket.getMaxIncome() != null
+                    && bracket.getMaxIncome().compareTo(BigDecimal.ZERO) > 0
+                    ? Money.of(bracket.getMaxIncome()) : null;
             double rate = bracket.getRate() != null ? bracket.getRate() : 0;
-            Double flatAmount = bracket.getFlatAmount();
+            BigDecimal flatAmount = Money.of(bracket.getFlatAmount());
 
-            if (grossSalary <= minIncome) {
+            if (gross.compareTo(minIncome) <= 0) {
                 break;
             }
 
-            double upper = Math.min(grossSalary, maxIncome);
-            double taxableInBracket = upper - minIncome;
-            if (taxableInBracket <= 0) {
+            BigDecimal upper = (maxIncome != null && gross.compareTo(maxIncome) < 0) ? gross : (maxIncome != null ? maxIncome : gross);
+            // When maxIncome is null the bracket is open-ended, so the upper bound is gross itself.
+            if (maxIncome == null) {
+                upper = gross;
+            }
+            BigDecimal taxableInBracket = Money.of(upper.subtract(minIncome));
+            if (taxableInBracket.compareTo(BigDecimal.ZERO) <= 0) {
                 continue;
             }
 
@@ -215,52 +223,67 @@ public class PayrollEnterpriseService {
             // (the base is already covered by the sum of lower brackets). Only
             // for flat-only brackets (fixed fee with no rate) do we apply the
             // flat amount.
-            if (flatAmount != null && flatAmount > 0 && rate == 0) {
-                tax += flatAmount;
+            if (flatAmount.compareTo(BigDecimal.ZERO) > 0 && rate == 0) {
+                tax = Money.add(tax, flatAmount);
             } else {
-                tax += taxableInBracket * rate;
+                tax = Money.add(tax, Money.percentOf(taxableInBracket, rate));
             }
 
-            if (grossSalary <= maxIncome) {
+            if (maxIncome != null && gross.compareTo(maxIncome) <= 0) {
                 break;
             }
         }
         return tax;
     }
 
-    private double calculateSimpleTax(double grossSalary) {
-        if (grossSalary <= 3000) return 0;
-        if (grossSalary <= 7000) return (grossSalary - 3000) * 0.15;
-        if (grossSalary <= 12000) return (4000 * 0.15) + ((grossSalary - 7000) * 0.25);
-        return (4000 * 0.15) + (5000 * 0.25) + ((grossSalary - 12000) * 0.35);
+    public BigDecimal calculateSimpleTax(BigDecimal grossSalary) {
+        BigDecimal gross = Money.of(grossSalary);
+        BigDecimal threeK = new BigDecimal("3000.00");
+        BigDecimal sevenK = new BigDecimal("7000.00");
+        BigDecimal twelveK = new BigDecimal("12000.00");
+        if (gross.compareTo(threeK) <= 0) return Money.zero();
+        if (gross.compareTo(sevenK) <= 0) return Money.percentOf(gross.subtract(threeK), 0.15);
+        if (gross.compareTo(twelveK) <= 0) {
+            return Money.add(
+                    Money.percentOf(new BigDecimal("4000.00"), 0.15),
+                    Money.percentOf(gross.subtract(sevenK), 0.25));
+        }
+        return Money.add(
+                Money.add(
+                        Money.percentOf(new BigDecimal("4000.00"), 0.15),
+                        Money.percentOf(new BigDecimal("5000.00"), 0.25)),
+                Money.percentOf(gross.subtract(twelveK), 0.35));
     }
 
     // ============================================================
     // 2. TAX SIMULATIONS
     // ============================================================
 
-    public Map<String, Object> simulateTax(String tenantId, String country, Double grossSalary) {
+    public Map<String, Object> simulateTax(String tenantId, String country, BigDecimal grossSalary) {
+        BigDecimal gross = Money.of(grossSalary);
         CountryTaxConfig taxConfig = taxConfigRepo.findByTenantIdAndCountry(tenantId, country).orElse(null);
         String taxYear = taxConfig != null ? taxConfig.getTaxYear() : String.valueOf(LocalDate.now().getYear());
 
-        double tax = calculateProgressiveTax(tenantId, country, taxYear, grossSalary);
-        double effectiveRate = grossSalary > 0 ? (tax / grossSalary) * 100 : 0;
+        BigDecimal tax = calculateProgressiveTax(tenantId, country, taxYear, gross);
+        // Effective rate is a statistical percentage, not money, so it stays a double.
+        double effectiveRate = gross.compareTo(BigDecimal.ZERO) > 0
+                ? tax.divide(gross, 6, java.math.RoundingMode.HALF_UP).doubleValue() * 100 : 0;
 
-        double socialSecurity = taxConfig != null && taxConfig.getSocialSecurityRate() != null
-                ? grossSalary * taxConfig.getSocialSecurityRate() : 0;
-        double medicare = taxConfig != null && taxConfig.getMedicareRate() != null
-                ? grossSalary * taxConfig.getMedicareRate() : 0;
+        BigDecimal socialSecurity = taxConfig != null && taxConfig.getSocialSecurityRate() != null
+                ? Money.percentOf(gross, taxConfig.getSocialSecurityRate()) : Money.zero();
+        BigDecimal medicare = taxConfig != null && taxConfig.getMedicareRate() != null
+                ? Money.percentOf(gross, taxConfig.getMedicareRate()) : Money.zero();
 
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("grossSalary", grossSalary);
+        result.put("grossSalary", gross);
         result.put("country", country);
         result.put("taxYear", taxYear);
-        result.put("tax", Math.round(tax * 100.0) / 100.0);
+        result.put("tax", tax);
         result.put("effectiveTaxRate", Math.round(effectiveRate * 100.0) / 100.0);
-        result.put("socialSecurity", Math.round(socialSecurity * 100.0) / 100.0);
-        result.put("medicare", Math.round(medicare * 100.0) / 100.0);
-        result.put("totalDeductions", Math.round((tax + socialSecurity + medicare) * 100.0) / 100.0);
-        result.put("netSalary", Math.round((grossSalary - tax - socialSecurity - medicare) * 100.0) / 100.0);
+        result.put("socialSecurity", socialSecurity);
+        result.put("medicare", medicare);
+        result.put("totalDeductions", Money.add(Money.add(tax, socialSecurity), medicare));
+        result.put("netSalary", Money.subtract(gross, Money.add(Money.add(tax, socialSecurity), medicare)));
 
         // Bracket breakdown
         List<TaxBracket> brackets = taxBracketRepo.findByTenantIdAndCountryAndTaxYearOrderByBracketOrder(tenantId, country, taxYear);
@@ -268,18 +291,19 @@ public class PayrollEnterpriseService {
         for (TaxBracket b : brackets) {
             bracketDetails.add(Map.of(
                     "range", b.getMinIncome() + " - " + (b.getMaxIncome() != null ? b.getMaxIncome() : "above"),
-                    "rate", (b.getRate() * 100) + "%",
-                    "flatAmount", b.getFlatAmount() != null ? b.getFlatAmount() : 0
+                    "rate", (b.getRate() != null ? b.getRate() * 100 : 0) + "%",
+                    "flatAmount", b.getFlatAmount() != null ? b.getFlatAmount() : Money.zero()
             ));
         }
         result.put("brackets", bracketDetails);
         return result;
     }
 
-    public List<Map<String, Object>> compareCountryTax(String tenantId, List<String> countries, Double grossSalary) {
+    public List<Map<String, Object>> compareCountryTax(String tenantId, List<String> countries, BigDecimal grossSalary) {
+        BigDecimal gross = Money.of(grossSalary);
         List<Map<String, Object>> results = new ArrayList<>();
         for (String country : countries) {
-            Map<String, Object> sim = simulateTax(tenantId, country, grossSalary);
+            Map<String, Object> sim = simulateTax(tenantId, country, gross);
             results.add(sim);
         }
         return results;
@@ -290,22 +314,23 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     public PayrollForecast generateForecast(String tenantId, String period) {
-        Double totalGross = payrollRepo.sumGrossSalaryByTenant(tenantId);
-        if (totalGross == null) totalGross = 0.0;
+        BigDecimal totalGross = payrollRepo.sumGrossSalaryByTenant(tenantId);
+        if (totalGross == null) totalGross = Money.zero();
+        totalGross = Money.of(totalGross);
 
         // Simple forecast: project based on historical trends
-        double projectedGross = totalGross * 1.03;
-        double projectedTax = projectedGross * 0.25;
-        double projectedNet = projectedGross - projectedTax;
-        double projectedBenefits = projectedGross * 0.08;
+        BigDecimal projectedGross = Money.percentOf(totalGross, 1.03);
+        BigDecimal projectedTax = Money.percentOf(projectedGross, 0.25);
+        BigDecimal projectedNet = Money.subtract(projectedGross, projectedTax);
+        BigDecimal projectedBenefits = Money.percentOf(projectedGross, 0.08);
 
         PayrollForecast forecast = new PayrollForecast();
         forecast.setTenantId(tenantId);
         forecast.setPeriod(period);
-        forecast.setProjectedGrossPayroll(Math.round(projectedGross * 100.0) / 100.0);
-        forecast.setProjectedNetPayroll(Math.round(projectedNet * 100.0) / 100.0);
-        forecast.setProjectedTax(Math.round(projectedTax * 100.0) / 100.0);
-        forecast.setProjectedBenefits(Math.round(projectedBenefits * 100.0) / 100.0);
+        forecast.setProjectedGrossPayroll(projectedGross);
+        forecast.setProjectedNetPayroll(projectedNet);
+        forecast.setProjectedTax(projectedTax);
+        forecast.setProjectedBenefits(projectedBenefits);
         forecast.setConfidence(85.0);
         forecast.setFactors("Based on historical payroll data with 3% growth adjustment");
         forecast.setStatus("ACTIVE");
@@ -382,13 +407,13 @@ public class PayrollEnterpriseService {
 
     @Transactional
     public BankTransaction createBankTransaction(String tenantId, Long payrollId, String employeeId,
-                                                  Double amount, String accountNumber, String routingNumber,
+                                                  BigDecimal amount, String accountNumber, String routingNumber,
                                                   String bankName) {
         BankTransaction tx = new BankTransaction();
         tx.setTenantId(tenantId);
         tx.setPayrollId(payrollId);
         tx.setEmployeeId(employeeId);
-        tx.setAmount(amount);
+        tx.setAmount(Money.of(amount));
         tx.setAccountNumber(accountNumber);
         tx.setRoutingNumber(routingNumber);
         tx.setBankName(bankName);
@@ -412,13 +437,13 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     @Transactional
-    public ExpenseReport submitExpense(String tenantId, String employeeId, String category, Double amount,
+    public ExpenseReport submitExpense(String tenantId, String employeeId, String category, BigDecimal amount,
                                         String description, String receiptUrl) {
         ExpenseReport expense = new ExpenseReport();
         expense.setTenantId(tenantId);
         expense.setEmployeeId(employeeId);
         expense.setCategory(category);
-        expense.setAmount(amount);
+        expense.setAmount(Money.of(amount));
         expense.setDescription(description);
         expense.setReceiptUrl(receiptUrl);
         expense.setExpenseDate(LocalDate.now());
@@ -454,15 +479,15 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     public BenefitPlan createBenefitPlan(String tenantId, String name, String type, String description,
-                                          Double employerContribution, Double employeeContribution, Double maxAmount) {
+                                          BigDecimal employerContribution, BigDecimal employeeContribution, BigDecimal maxAmount) {
         BenefitPlan plan = new BenefitPlan();
         plan.setTenantId(tenantId);
         plan.setName(name);
         plan.setType(type);
         plan.setDescription(description);
-        plan.setEmployerContribution(employerContribution);
-        plan.setEmployeeContribution(employeeContribution);
-        plan.setMaxBenefitAmount(maxAmount);
+        plan.setEmployerContribution(Money.of(employerContribution));
+        plan.setEmployeeContribution(Money.of(employeeContribution));
+        plan.setMaxBenefitAmount(Money.of(maxAmount));
         plan.setIsActive(true);
         plan.setCreatedAt(LocalDateTime.now());
         plan.setUpdatedAt(LocalDateTime.now());
@@ -510,13 +535,13 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     @Transactional
-    public CompensationPlan createCompensationPlan(String tenantId, String employeeId, Double currentSalary,
-                                                    Double proposedSalary, String currency, String reason, String reviewCycle) {
+    public CompensationPlan createCompensationPlan(String tenantId, String employeeId, BigDecimal currentSalary,
+                                                    BigDecimal proposedSalary, String currency, String reason, String reviewCycle) {
         CompensationPlan plan = new CompensationPlan();
         plan.setTenantId(tenantId);
         plan.setEmployeeId(employeeId);
-        plan.setCurrentBaseSalary(currentSalary);
-        plan.setProposedBaseSalary(proposedSalary);
+        plan.setCurrentBaseSalary(Money.of(currentSalary));
+        plan.setProposedBaseSalary(Money.of(proposedSalary));
         plan.setCurrency(currency);
         plan.setReason(reason);
         plan.setReviewCycle(reviewCycle);
@@ -536,11 +561,11 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     @Transactional
-    public Bonus createBonus(String tenantId, String employeeId, Double amount, String type, String reason) {
+    public Bonus createBonus(String tenantId, String employeeId, BigDecimal amount, String type, String reason) {
         Bonus bonus = new Bonus();
         bonus.setTenantId(tenantId);
         bonus.setEmployeeId(employeeId);
-        bonus.setAmount(amount);
+        bonus.setAmount(Money.of(amount));
         bonus.setType(type);
         bonus.setReason(reason);
         bonus.setAwardDate(LocalDate.now());
@@ -565,14 +590,14 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     @Transactional
-    public EquityGrant createEquityGrant(String tenantId, String employeeId, Double shares, Double strikePrice,
-                                          Double fairMarketValue, String equityType, String vestingSchedule) {
+    public EquityGrant createEquityGrant(String tenantId, String employeeId, BigDecimal shares, BigDecimal strikePrice,
+                                          BigDecimal fairMarketValue, String equityType, String vestingSchedule) {
         EquityGrant grant = new EquityGrant();
         grant.setTenantId(tenantId);
         grant.setEmployeeId(employeeId);
-        grant.setShares(shares);
-        grant.setStrikePrice(strikePrice);
-        grant.setFairMarketValue(fairMarketValue);
+        grant.setShares(shares == null ? null : new BigDecimal(shares.toString()));
+        grant.setStrikePrice(Money.of(strikePrice));
+        grant.setFairMarketValue(Money.of(fairMarketValue));
         grant.setEquityType(equityType);
         grant.setVestingSchedule(vestingSchedule);
         grant.setGrantDate(LocalDate.now());
@@ -589,18 +614,18 @@ public class PayrollEnterpriseService {
     // ============================================================
 
     public SalaryBenchmark addBenchmark(String tenantId, String role, String experience, String location,
-                                         Double p10, Double p25, Double p50, Double p75, Double p90,
+                                         BigDecimal p10, BigDecimal p25, BigDecimal p50, BigDecimal p75, BigDecimal p90,
                                          String currency, String source) {
         SalaryBenchmark benchmark = new SalaryBenchmark();
         benchmark.setTenantId(tenantId);
         benchmark.setRole(role);
         benchmark.setExperience(experience);
         benchmark.setLocation(location);
-        benchmark.setPercentile10(p10);
-        benchmark.setPercentile25(p25);
-        benchmark.setPercentile50(p50);
-        benchmark.setPercentile75(p75);
-        benchmark.setPercentile90(p90);
+        benchmark.setPercentile10(Money.of(p10));
+        benchmark.setPercentile25(Money.of(p25));
+        benchmark.setPercentile50(Money.of(p50));
+        benchmark.setPercentile75(Money.of(p75));
+        benchmark.setPercentile90(Money.of(p90));
         benchmark.setCurrency(currency);
         benchmark.setSource(source);
         benchmark.setYear(String.valueOf(LocalDate.now().getYear()));
@@ -609,21 +634,23 @@ public class PayrollEnterpriseService {
     }
 
     public Map<String, Object> compareToBenchmark(String tenantId, String role, String experience,
-                                                   String location, Double currentSalary) {
+                                                   String location, BigDecimal currentSalary) {
         Optional<SalaryBenchmark> opt = benchmarkRepo.findByTenantIdAndRoleAndExperienceAndLocation(
                 tenantId, role, experience, location);
         if (opt.isEmpty()) {
             return Map.of("error", "No benchmark data found for this role/experience/location");
         }
         SalaryBenchmark b = opt.get();
+        BigDecimal current = Money.of(currentSalary);
         String position;
-        if (currentSalary < b.getPercentile25()) position = "Below 25th percentile";
-        else if (currentSalary < b.getPercentile50()) position = "Between 25th-50th percentile";
-        else if (currentSalary < b.getPercentile75()) position = "Between 50th-75th percentile";
+        if (current.compareTo(b.getPercentile25()) < 0) position = "Below 25th percentile";
+        else if (current.compareTo(b.getPercentile50()) < 0) position = "Between 25th-50th percentile";
+        else if (current.compareTo(b.getPercentile75()) < 0) position = "Between 50th-75th percentile";
         else position = "Above 75th percentile";
 
-        double vsMedian = b.getPercentile50() > 0
-                ? ((currentSalary - b.getPercentile50()) / b.getPercentile50()) * 100 : 0;
+        // vsMedian is a statistical percentage, not money.
+        double vsMedian = b.getPercentile50() != null && b.getPercentile50().compareTo(BigDecimal.ZERO) > 0
+                ? current.subtract(b.getPercentile50()).divide(b.getPercentile50(), 6, java.math.RoundingMode.HALF_UP).doubleValue() * 100 : 0;
 
         return Map.of(
                 "role", role, "experience", experience, "location", location,
@@ -644,20 +671,28 @@ public class PayrollEnterpriseService {
         StringBuilder details = new StringBuilder();
 
         if ("TAX".equals(reportType)) {
-            Double totalTax = payrollRepo.sumTaxByTenantAndPeriod(tenantId, period);
-            Double totalGross = payrollRepo.sumBaseSalaryByTenantAndPeriod(tenantId, period);
-            details.append("Total Tax Withheld: ").append(totalTax != null ? totalTax : 0).append("\n");
-            details.append("Total Gross Payroll: ").append(totalGross != null ? totalGross : 0).append("\n");
-            details.append("Effective Tax Rate: ").append(totalGross != null && totalGross > 0
-                    ? String.format("%.2f%%", (totalTax / totalGross) * 100) : "0%");
+            BigDecimal totalTax = Money.of(payrollRepo.sumTaxByTenantAndPeriod(tenantId, period));
+            BigDecimal totalGross = Money.of(payrollRepo.sumBaseSalaryByTenantAndPeriod(tenantId, period));
+            details.append("Total Tax Withheld: ").append(totalTax).append("\n");
+            details.append("Total Gross Payroll: ").append(totalGross).append("\n");
+            if (totalGross.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal rate = totalTax.divide(totalGross, 4, java.math.RoundingMode.HALF_UP)
+                        .multiply(new BigDecimal("100")).setScale(2, java.math.RoundingMode.HALF_UP);
+                details.append("Effective Tax Rate: ").append(rate).append("%");
+            } else {
+                details.append("Effective Tax Rate: 0%");
+            }
         } else if ("SOCIAL_SECURITY".equals(reportType)) {
-            Double totalGross = payrollRepo.sumBaseSalaryByTenantAndPeriod(tenantId, period);
-            details.append("Total Gross Payroll: ").append(totalGross != null ? totalGross : 0).append("\n");
-            details.append("Social Security Due: ").append(totalGross != null ? totalGross * 0.062 : 0).append("\n");
-            details.append("Medicare Due: ").append(totalGross != null ? totalGross * 0.0145 : 0);
+            BigDecimal totalGross = Money.of(payrollRepo.sumBaseSalaryByTenantAndPeriod(tenantId, period));
+            details.append("Total Gross Payroll: ").append(totalGross).append("\n");
+            details.append("Social Security Due: ").append(Money.percentOf(totalGross, 0.062)).append("\n");
+            details.append("Medicare Due: ").append(Money.percentOf(totalGross, 0.0145));
         } else {
             List<EnhancedPayrollRecord> records = payrollRepo.findByTenantIdAndPeriod(tenantId, period);
-            Double sum = records.stream().mapToDouble(EnhancedPayrollRecord::getNetSalary).sum();
+            BigDecimal sum = records.stream()
+                    .map(EnhancedPayrollRecord::getNetSalary)
+                    .map(Money::of)
+                    .reduce(Money.zero(), BigDecimal::add);
             details.append("Total Records: ").append(records.size()).append("\n");
             details.append("Total Net Payroll: ").append(sum);
         }
@@ -684,16 +719,20 @@ public class PayrollEnterpriseService {
     public void detectPayrollAnomalies(EnhancedPayrollRecord record) {
         String tenantId = record.getTenantId();
 
-        // Check for salary increase > 50%
-        if (record.getGrossSalary() > 0) {
+        // Check for salary increase > 50%. Change is a statistical percentage.
+        if (record.getGrossSalary() != null && record.getGrossSalary().compareTo(BigDecimal.ZERO) > 0) {
             List<EnhancedPayrollRecord> previous = payrollRepo.findByTenantIdAndEmployeeId(tenantId, record.getEmployeeId());
             if (previous.size() > 1) {
                 EnhancedPayrollRecord last = previous.get(previous.size() - 2);
-                double change = Math.abs((record.getGrossSalary() - last.getGrossSalary()) / last.getGrossSalary()) * 100;
-                if (change > 50) {
-                    saveAnomaly(tenantId, record.getId(), record.getEmployeeId(),
-                            "salary_spike", "high",
-                            "Salary changed by " + String.format("%.1f", change) + "% compared to previous period");
+                if (last.getGrossSalary() != null && last.getGrossSalary().compareTo(BigDecimal.ZERO) > 0) {
+                    BigDecimal change = record.getGrossSalary().subtract(last.getGrossSalary())
+                            .divide(last.getGrossSalary(), 6, java.math.RoundingMode.HALF_UP)
+                            .multiply(new BigDecimal("100")).abs();
+                    if (change.compareTo(new BigDecimal("50")) > 0) {
+                        saveAnomaly(tenantId, record.getId(), record.getEmployeeId(),
+                                "salary_spike", "high",
+                                "Salary changed by " + change.setScale(1, java.math.RoundingMode.HALF_UP) + "% compared to previous period");
+                    }
                 }
             }
         }
@@ -708,17 +747,19 @@ public class PayrollEnterpriseService {
         }
 
         // Unusually high tax
-        if (record.getGrossSalary() > 0) {
-            double taxRate = (record.getTax() / record.getGrossSalary()) * 100;
-            if (taxRate > 45) {
+        if (record.getGrossSalary() != null && record.getGrossSalary().compareTo(BigDecimal.ZERO) > 0) {
+            BigDecimal taxRate = Money.of(record.getTax())
+                    .divide(record.getGrossSalary(), 6, java.math.RoundingMode.HALF_UP)
+                    .multiply(new BigDecimal("100"));
+            if (taxRate.compareTo(new BigDecimal("45")) > 0) {
                 saveAnomaly(tenantId, record.getId(), record.getEmployeeId(),
                         "high_tax_rate", "medium",
-                        "Tax rate of " + String.format("%.1f", taxRate) + "% exceeds 45% threshold");
+                        "Tax rate of " + taxRate.setScale(1, java.math.RoundingMode.HALF_UP) + "% exceeds 45% threshold");
             }
         }
 
         // Zero or negative net salary
-        if (record.getNetSalary() <= 0) {
+        if (record.getNetSalary() == null || record.getNetSalary().compareTo(BigDecimal.ZERO) <= 0) {
             saveAnomaly(tenantId, record.getId(), record.getEmployeeId(),
                     "negative_net_salary", "critical",
                     "Net salary is " + record.getNetSalary() + " for employee " + record.getEmployeeId());
@@ -746,18 +787,27 @@ public class PayrollEnterpriseService {
 
     public Map<String, Object> getDashboardSummary(String tenantId) {
         List<EnhancedPayrollRecord> all = payrollRepo.findByTenantId(tenantId);
-        double totalGross = all.stream().mapToDouble(EnhancedPayrollRecord::getGrossSalary).sum();
-        double totalNet = all.stream().mapToDouble(EnhancedPayrollRecord::getNetSalary).sum();
-        double totalTax = all.stream().mapToDouble(EnhancedPayrollRecord::getTax).sum();
+        BigDecimal totalGross = all.stream()
+                .map(EnhancedPayrollRecord::getGrossSalary)
+                .map(Money::of)
+                .reduce(Money.zero(), BigDecimal::add);
+        BigDecimal totalNet = all.stream()
+                .map(EnhancedPayrollRecord::getNetSalary)
+                .map(Money::of)
+                .reduce(Money.zero(), BigDecimal::add);
+        BigDecimal totalTax = all.stream()
+                .map(EnhancedPayrollRecord::getTax)
+                .map(Money::of)
+                .reduce(Money.zero(), BigDecimal::add);
         long pendingExpenses = expenseRepo.findByTenantIdAndStatus(tenantId, "PENDING").size();
         long anomalies = anomalyRepo.findByTenantIdAndIsResolved(tenantId, false).size();
         long pendingBonuses = bonusRepo.findByTenantIdAndStatus(tenantId, "PENDING").size();
 
         return Map.of(
                 "totalPayrollRecords", all.size(),
-                "totalGrossPayroll", Math.round(totalGross * 100.0) / 100.0,
-                "totalNetPayroll", Math.round(totalNet * 100.0) / 100.0,
-                "totalTaxWithheld", Math.round(totalTax * 100.0) / 100.0,
+                "totalGrossPayroll", totalGross,
+                "totalNetPayroll", totalNet,
+                "totalTaxWithheld", totalTax,
                 "pendingExpenses", pendingExpenses,
                 "unresolvedAnomalies", anomalies,
                 "pendingBonuses", pendingBonuses
@@ -771,7 +821,7 @@ public class PayrollEnterpriseService {
     private static final int BATCH_SIZE = 500;
 
     public Map<String, Object> runBatchPayroll(String tenantId, String period, List<String> employeeIds,
-                                                Double baseSalary, Double allowances, Double deductions,
+                                                BigDecimal baseSalary, BigDecimal allowances, BigDecimal deductions,
                                                 String country, String currency) {
         int total = employeeIds.size();
         int processed = 0;
