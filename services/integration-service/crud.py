@@ -139,6 +139,7 @@ def create_delivery_log(db: Session, tenant_id: str, webhook_id: UUID, event_typ
         event_type=event_type,
         payload=payload,
         max_attempts=max_attempts,
+        next_retry_at=datetime.now(timezone.utc),
     )
     db.add(log)
     db.commit()
