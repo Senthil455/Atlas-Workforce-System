@@ -207,6 +207,7 @@ services:
       - MFA_STEPUP_SECRET=${MFA_STEPUP_SECRET:-atlas-mfa-stepup-secret-change-me}
       - ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD:-ChangeMe123!}
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme_redis_pass}@redis:6379
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
       - NODE_ENV=${NODE_ENV:-production}
       - AUDIT_SERVICE_URL=http://audit-compliance-service:8011
@@ -222,6 +223,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
 
   employee-service:
     build:

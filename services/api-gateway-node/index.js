@@ -1013,6 +1013,9 @@ function proxyService(target, prefix, pathRewrite) {
       proxyReq(proxyReq, req) {
         const correlationId = req.headers['x-correlation-id'] || crypto.randomUUID();
         proxyReq.setHeader('x-correlation-id', correlationId);
+        // Pass the real client IP for downstream rate limiting.
+        // The gateway has trust proxy configured, so req.ip is the real client IP.
+        proxyReq.setHeader('x-real-client-ip', req.ip);
         // Overwrite tenant header with verified claim so downstream cannot be spoofed
         const tenantId = req.headers['x-tenant-id'] || req.headers['X-Tenant-Id'] || req.user?.tenant_id;
         if (tenantId) {

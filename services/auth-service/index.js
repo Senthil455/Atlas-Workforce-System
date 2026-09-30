@@ -344,6 +344,16 @@ redisClient.on('error', (err) => console.log('Auth Redis Client Error', err));
   }
 })();
 
+// Resolve the real client IP. The gateway passes it in x-real-client-ip;
+// we never trust X-Forwarded-For because clients can spoof it.
+function getClientIp(req) {
+  const forwarded = req.headers['x-real-client-ip'];
+  if (forwarded && typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.trim().split(',')[0].trim();
+  }
+  return req.ip;
+}
+
 const BCRYPT_COST = 12;
 
 function sanitizeForLogs(obj) {
@@ -632,33 +642,105 @@ function requireScimAuth(req, res, next) {
 
 const rateLimitStore = new Map();
 
-function createUserRateLimiter(action, maxRequests = 20, windowMs = 15 * 60 * 1000) {
-  return (req, res, next) => {
-    const identifier = req.user?.id || req.ip;
-    const key = `${identifier}:${action}`;
-    const now = Date.now();
+// Atomic Redis rate-limit check via Lua script: INCR + PEXPIRE on first hit.
+// Returns { count, ttl } or null on error.
+const RATE_LIMIT_SCRIPT = `
+  local current = redis.call('INCR', KEYS[1])
+  local ttl
+  if current == 1 then
+    redis.call('PEXPIRE', KEYS[1], ARGV[1])
+    ttl = ARGV[1]
+  else
+    ttl = redis.call('PTTL', KEYS[1])
+  end
+  return {current, math.max(ttl, 0)}
+`;
 
-    let entry = rateLimitStore.get(key);
-    if (!entry) {
-      entry = { count: 1, startTime: now };
-      rateLimitStore.set(key, entry);
-    } else {
-      if (now - entry.startTime > windowMs) {
-        entry.count = 1;
-        entry.startTime = now;
-      } else {
-        entry.count++;
+async function redisRateLimitCheck(key, windowMs) {
+  try {
+    const result = await redisClient.eval(RATE_LIMIT_SCRIPT, {
+      keys: [`rl:${key}`],
+      arguments: [String(windowMs)],
+    });
+    return { count: result[0], ttl: result[1] };
+  } catch (err) {
+    return null;
+  }
+}
+
+function createUserRateLimiter(action, maxRequests = 20, windowMs = 15 * 60 * 1000, options = {}) {
+  const { keyByEmail = false } = options;
+
+  return async (req, res, next) => {
+    const clientIp = getClientIp(req);
+    const identifier = req.user?.id || clientIp;
+    const keys = [`${identifier}:${action}`];
+
+    // For credential-stuffing endpoints, also key on email/username so a
+    // distributed attack against a single account is caught even when the
+    // source IPs differ.
+    if (keyByEmail && req.body && req.body.email) {
+      const email = String(req.body.email).toLowerCase().trim();
+      keys.push(`email:${email}:${action}`);
+    }
+
+    const now = Date.now();
+    let maxCount = 0;
+    let windowStart = now;
+    let fromRedis = false;
+
+    // Try Redis first for distributed rate limiting across replicas.
+    if (redisClient.isReady) {
+      try {
+        let allSucceeded = true;
+        for (const key of keys) {
+          const result = await redisRateLimitCheck(key, windowMs);
+          if (result) {
+            if (result.count > maxCount) {
+              maxCount = result.count;
+              windowStart = now - (windowMs - result.ttl);
+            }
+          } else {
+            allSucceeded = false;
+            break;
+          }
+        }
+        fromRedis = allSucceeded;
+      } catch (err) {
+        fromRedis = false;
+      }
+    }
+
+    // In-process fallback when Redis is unavailable.
+    if (!fromRedis) {
+      for (const key of keys) {
+        let entry = rateLimitStore.get(key);
+        if (!entry) {
+          entry = { count: 1, startTime: now };
+          rateLimitStore.set(key, entry);
+        } else {
+          if (now - entry.startTime > windowMs) {
+            entry.count = 1;
+            entry.startTime = now;
+          } else {
+            entry.count++;
+          }
+        }
+        if (entry.count > maxCount) {
+          maxCount = entry.count;
+          windowStart = entry.startTime;
+        }
       }
     }
 
     res.setHeader('X-RateLimit-Limit', maxRequests);
-    res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - entry.count));
-    res.setHeader('X-RateLimit-Reset', Math.ceil((entry.startTime + windowMs) / 1000));
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - maxCount));
+    res.setHeader('X-RateLimit-Reset', Math.ceil((windowStart + windowMs) / 1000));
 
-    if (entry.count > maxRequests) {
+    if (maxCount > maxRequests) {
       return res.status(429).json({
         message: 'Too many requests. Please try again later.',
-        retryAfter: Math.ceil((entry.startTime + windowMs - now) / 1000)
+        retryAfter: Math.ceil((windowStart + windowMs - now) / 1000)
       });
     }
 
@@ -1037,7 +1119,7 @@ initDB().catch((err) => {
   console.error('Database initialization failed:', err);
 });
 
-app.post('/register', createUserRateLimiter('register', 10), async (req, res) => {
+app.post('/register', createUserRateLimiter('register', 10, 15 * 60 * 1000, { keyByEmail: true }), async (req, res) => {
   const { email, password, name, department, position } = req.body;
   if (!email || !password || !name) {
     return res.status(400).json({ message: 'Email, password, and name are required' });
@@ -1096,7 +1178,7 @@ app.post('/register', createUserRateLimiter('register', 10), async (req, res) =>
   }
 });
 
-app.post('/login', createUserRateLimiter('login', 20), async (req, res) => {
+app.post('/login', createUserRateLimiter('login', 20, 15 * 60 * 1000, { keyByEmail: true }), async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required' });
@@ -2313,7 +2395,7 @@ app.post('/saml/login', createUserRateLimiter('saml_login', 20), async (req, res
   }
 });
 
-app.post('/auth/passwordless/request', createUserRateLimiter('passwordless_request', 5), async (req, res) => {
+app.post('/auth/passwordless/request', createUserRateLimiter('passwordless_request', 5, 15 * 60 * 1000, { keyByEmail: true }), async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) {
@@ -2800,7 +2882,7 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
   }
 });
 
-app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 10), async (req, res) => {
+app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 10, 15 * 60 * 1000, { keyByEmail: true }), async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) {
