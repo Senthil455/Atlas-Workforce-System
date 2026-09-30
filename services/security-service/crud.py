@@ -56,6 +56,23 @@ from models import (
 
 PAGE_SIZE = 50
 
+def require_fields(data: dict, fields: list) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("Request body must be a JSON object")
+    missing = [f for f in fields if data.get(f) in (None, "")]
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+def resolve_tenant(data: dict, context_tenant=None) -> str:
+    body_tenant = data.get("tenant_id") if isinstance(data, dict) else None
+    if context_tenant:
+        if body_tenant and body_tenant != context_tenant:
+            raise ValueError("Tenant mismatch between context and body")
+        return context_tenant
+    if not body_tenant:
+        raise ValueError("Missing required fields: tenant_id")
+    return body_tenant
+
 
 class MassAssignmentError(ValueError):
     pass
@@ -248,6 +265,7 @@ def evaluate_ca_policy(policy: ConditionalAccessPolicy, context: dict) -> dict:
 # ── Risk-Based Authentication ───────────────────────────────────────────────
 
 def assess_risk(db: Session, data: dict) -> dict:
+    require_fields(data, ["tenant_id", "user_id"])
     score = 0
     factors = data.get("factors", {})
 
@@ -360,6 +378,7 @@ def get_privileged_role(db: Session, role_id: uuid.UUID):
     return db.query(PrivilegedRole).filter(PrivilegedRole.id == role_id).first()
 
 def request_privileged_access(db: Session, data: dict):
+    require_fields(data, ["tenant_id", "user_id", "role_id"])
     grant = PrivilegedAccess(
         tenant_id=data["tenant_id"],
         user_id=data["user_id"],
@@ -472,6 +491,7 @@ def list_dlp_incidents(db: Session, tenant_id: str = None, status: str = None, s
     return _paginate(q, page, page_size)
 
 def report_dlp_incident(db: Session, data: dict):
+    require_fields(data, ["tenant_id"])
     incident = DLPIncident(**filter_create_data(data, DLP_INCIDENT_CREATE_FIELDS))
     db.add(incident)
     db.commit()
@@ -599,6 +619,7 @@ def check_data_residency(policy: DataResidencyPolicy, target_region: str) -> dic
 # ── Session Recording ───────────────────────────────────────────────────────
 
 def start_session_recording(db: Session, data: dict):
+    require_fields(data, ["tenant_id", "user_id"])
     filtered = filter_create_data(data, SESSION_RECORDING_CREATE_FIELDS)
     recording = SessionRecording(
         tenant_id=filtered["tenant_id"],
