@@ -1,0 +1,164 @@
+# Default-deny ingress for the datastores. Only the pods that need a store
+# can reach it; everything else (including a compromised frontend) cannot
+# open direct connections to Postgres, Mongo, Redis, RabbitMQ or Kafka.
+# policyTypes is Ingress-only on purpose so pod egress (DNS, outbound APIs)
+# keeps working. App label names match k8s/deployments.yaml; datastore
+# labels match k8s/infrastructure.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 5432
+    from:
+    - podSelector:
+        matchLabels:
+          app: auth-service
+    - podSelector:
+        matchLabels:
+          app: integration-service
+    - podSelector:
+        matchLabels:
+          app: audit-compliance-service
+    - podSelector:
+        matchLabels:
+          app: analytics-python-service
+    - podSelector:
+        matchLabels:
+          app: attendance-service
+    - podSelector:
+        matchLabels:
+          app: payroll-java-service
+    - podSelector:
+        matchLabels:
+          app: leave-service
+    - podSelector:
+        matchLabels:
+          app: ats-service
+    - podSelector:
+        matchLabels:
+          app: lms-service
+    - podSelector:
+        matchLabels:
+          app: performance-service
+    - podSelector:
+        matchLabels:
+          app: security-service
+    - podSelector:
+        matchLabels:
+          app: employee-lifecycle-service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongodb-allow-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: mongodb
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 27017
+    from:
+    - podSelector:
+        matchLabels:
+          app: employee-python-service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 6379
+    from:
+    - podSelector:
+        matchLabels:
+          app: api-gateway
+    - podSelector:
+        matchLabels:
+          app: auth-service
+    - podSelector:
+        matchLabels:
+          app: ai-copilot-service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-allow-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 5672
+    from:
+    - podSelector:
+        matchLabels:
+          app: employee-python-service
+    - podSelector:
+        matchLabels:
+          app: payroll-java-service
+    - podSelector:
+        matchLabels:
+          app: analytics-python-service
+    - podSelector:
+        matchLabels:
+          app: notification-go-service
+    - podSelector:
+        matchLabels:
+          app: integration-service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-allow-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: kafka
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 9092
+    from:
+    - podSelector:
+        matchLabels:
+          app: integration-service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zookeeper-allow-kafka
+spec:
+  podSelector:
+    matchLabels:
+      app: zookeeper
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 2181
+    from:
+    - podSelector:
+        matchLabels:
+          app: kafka

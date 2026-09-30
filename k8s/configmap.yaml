@@ -1,0 +1,53 @@
+# atlas-config - non-secret configuration loaded by every backend Deployment
+# in deployments.yaml via envFrom alongside the atlas-secrets Secret.
+# Service DNS names below match k8s/services.yaml. No passwords here on
+# purpose; anything credential-shaped belongs in secret.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: atlas-config
+  labels:
+    app: atlas-config
+data:
+  NODE_ENV: "production"
+  ALLOWED_ORIGINS: "http://localhost:3000"
+  CORS_ORIGINS: "http://localhost:3000"
+  # --- service discovery (must match k8s/services.yaml names and ports) ---
+  AUTH_SERVICE_URL: "http://auth-service:8010"
+  EMPLOYEE_SERVICE_URL: "http://employee-service:8001"
+  PAYROLL_SERVICE_URL: "http://payroll-service:8002"
+  ANALYTICS_SERVICE_URL: "http://analytics-service:8003"
+  NOTIFICATION_SERVICE_URL: "http://notification-service:8004"
+  ATTENDANCE_SERVICE_URL: "http://attendance-service:8005"
+  LEAVE_SERVICE_URL: "http://leave-service:8006"
+  AUDIT_COMPLIANCE_SERVICE_URL: "http://audit-compliance-service:8011"
+  AUDIT_SERVICE_URL: "http://audit-compliance-service:8011"
+  ATS_SERVICE_URL: "http://ats-service:8012"
+  LMS_SERVICE_URL: "http://lms-service:8013"
+  PERFORMANCE_SERVICE_URL: "http://performance-service:8014"
+  AI_COPILOT_SERVICE_URL: "http://ai-copilot-service:8015"
+  INTEGRATION_SERVICE_URL: "http://integration-service:8016"
+  EMPLOYEE_LIFECYCLE_SERVICE_URL: "http://employee-lifecycle-service:8020"
+  SECURITY_SERVICE_URL: "http://security-service:8050"
+  AI_SERVICE_URL: "http://ai-service:8065"
+  LIVE_SERVICE_URL: "http://live-service:8060"
+  WORKFORCE_SERVICE_URL: "http://workforce-planning-service:8017"
+  # --- datastores (hosts are the k8s Service names) ---
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  RABBITMQ_HOST: "rabbitmq"
+  RABBITMQ_USER: "atlas_rabbit"
+  POSTGRES_USER: "atlas_user"
+  POSTGRES_DB: "atlas_db"
+  MONGO_USER: "admin"
+  MONGO_DB: "atlas_db"
+  DB_HOST: "postgres"
+  DB_USER: "atlas_user"
+  DB_NAME: "atlas_db"
+  DB_PORT: "5432"
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/atlas_db"
+  SPRING_DATASOURCE_USERNAME: "atlas_user"
+  SPRING_RABBITMQ_HOST: "rabbitmq"
+  SPRING_RABBITMQ_PORT: "5672"
+  SPRING_RABBITMQ_USERNAME: "atlas_rabbit"
+  SAML_IDP_SSO_URL: "https://idp.example.com/sso"
+  SAML_IDP_ENTITY_ID: "https://idp.example.com/metadata"

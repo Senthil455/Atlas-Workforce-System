@@ -20,7 +20,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: api-gateway
-        image: ghcr.io/senthil455/atlas-workforce-system/api-gateway-node:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/api-gateway-node:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
         securityContext:
@@ -49,6 +50,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -72,7 +75,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: frontend
-        image: ghcr.io/senthil455/atlas-workforce-system/frontend:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/frontend:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 3000
         securityContext:
@@ -121,7 +125,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: auth-service
-        image: ghcr.io/senthil455/atlas-workforce-system/auth-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/auth-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8010
         securityContext:
@@ -157,6 +162,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -180,7 +187,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: employee-service
-        image: ghcr.io/senthil455/atlas-workforce-system/employee-python-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/employee-python-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8001
         securityContext:
@@ -209,6 +217,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -232,7 +242,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: payroll-service
-        image: ghcr.io/senthil455/atlas-workforce-system/payroll-java-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/payroll-java-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8002
         securityContext:
@@ -261,6 +272,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -284,7 +297,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: analytics-service
-        image: ghcr.io/senthil455/atlas-workforce-system/analytics-python-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/analytics-python-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8003
         securityContext:
@@ -313,6 +327,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -336,7 +352,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: notification-service
-        image: ghcr.io/senthil455/atlas-workforce-system/notification-go-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/notification-go-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8004
         securityContext:
@@ -365,6 +382,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -388,7 +407,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: attendance-service
-        image: ghcr.io/senthil455/atlas-workforce-system/attendance-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/attendance-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8005
         securityContext:
@@ -417,6 +437,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -440,7 +462,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: leave-service
-        image: ghcr.io/senthil455/atlas-workforce-system/leave-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/leave-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8006
         securityContext:
@@ -469,6 +492,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -492,7 +517,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: audit-compliance-service
-        image: ghcr.io/senthil455/atlas-workforce-system/audit-compliance-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/audit-compliance-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8011
         securityContext:
@@ -521,6 +547,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -544,7 +572,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: ats-service
-        image: ghcr.io/senthil455/atlas-workforce-system/ats-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/ats-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8012
         securityContext:
@@ -573,6 +602,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -596,7 +627,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: lms-service
-        image: ghcr.io/senthil455/atlas-workforce-system/lms-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/lms-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8013
         securityContext:
@@ -625,6 +657,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -648,7 +682,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: performance-service
-        image: ghcr.io/senthil455/atlas-workforce-system/performance-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/performance-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8014
         securityContext:
@@ -677,6 +712,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -700,7 +737,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: ai-copilot-service
-        image: ghcr.io/senthil455/atlas-workforce-system/ai-copilot-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/ai-copilot-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8015
         securityContext:
@@ -729,6 +767,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -752,7 +792,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: integration-service
-        image: ghcr.io/senthil455/atlas-workforce-system/integration-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/integration-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8016
         securityContext:
@@ -781,6 +822,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -804,7 +847,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: employee-lifecycle-service
-        image: ghcr.io/senthil455/atlas-workforce-system/employee-lifecycle-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/employee-lifecycle-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8020
         securityContext:
@@ -833,6 +877,8 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -856,7 +902,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: security-service
-        image: ghcr.io/senthil455/atlas-workforce-system/security-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/security-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8050
         securityContext:
@@ -885,6 +932,16 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
+        env:
+        # INTERNAL_API_KEY must be the security key here, not the audit key
+        # from the shared Secret (explicit env wins over envFrom).
+        - name: INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: atlas-secrets
+              key: SECURITY_INTERNAL_KEY
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -908,7 +965,8 @@ spec:
         fsGroup: 1001
       containers:
       - name: ai-service
-        image: ghcr.io/senthil455/atlas-workforce-system/ai-service:latest
+        image: ghcr.io/senthil455/atlas-workforce-system/ai-service:a89d2bce0db49b3aab7677fbf2ba08c79cd0efb3
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8065
         securityContext:
@@ -937,3 +995,5 @@ spec:
         envFrom:
         - secretRef:
             name: atlas-secrets
+        - configMapRef:
+            name: atlas-config
