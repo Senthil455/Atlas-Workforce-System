@@ -4,26 +4,43 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 from uuid import UUID
 
 import httpx
+
+from ssrf_guard import MAX_RESPONSE_BODY_CHARS, SSRFBlockedError, validate_webhook_headers, validate_webhook_url
 
 logger = logging.getLogger("webhook-engine")
 
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "svc-integration-key-change-in-production")
 AUDIT_SERVICE_URL = os.environ.get("AUDIT_SERVICE_URL", "http://audit-compliance-service:8011")
 
-_http_client: Optional[httpx.AsyncClient] = None
+# httpx.AsyncClient pools hold primitives bound to the loop that first used
+# them, so one global client cannot be shared across the per-delivery loops
+# created in event_router. Keep one client per running loop instead.
+_clients: Dict[int, httpx.AsyncClient] = {}
+_clients_lock = threading.Lock()
+
+
+def _loop_key() -> Optional[int]:
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return None
 
 
 def get_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None:
-        _http_client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_keepalive_connections=50, max_connections=100))
-    return _http_client
+    key = _loop_key()
+    with _clients_lock:
+        client = _clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_keepalive_connections=50, max_connections=100))
+            _clients[key] = client
+        return client
 
 
 def compute_signature(payload: bytes, secret: str) -> str:
@@ -40,6 +57,18 @@ async def deliver_webhook(
     custom_headers: Optional[dict[str, str]] = None,
     timeout_sec: int = 30,
 ) -> tuple[int, Optional[str]]:
+    try:
+        validate_webhook_url(url)
+    except SSRFBlockedError as e:
+        logger.warning(f"Blocked webhook delivery to disallowed destination: {e}")
+        return 0, f"Blocked destination: {e}"
+
+    try:
+        safe_headers = validate_webhook_headers(custom_headers)
+    except SSRFBlockedError as e:
+        logger.warning(f"Blocked webhook delivery with disallowed headers: {e}")
+        return 0, f"Blocked headers: {e}"
+
     client = get_client()
     body = json.dumps(payload, default=str).encode("utf-8")
 
@@ -51,12 +80,14 @@ async def deliver_webhook(
     }
     if secret:
         headers["X-Webhook-Signature"] = compute_signature(body, secret)
-    if custom_headers:
-        headers.update(custom_headers)
+    if safe_headers:
+        headers.update(safe_headers)
 
     try:
-        response = await client.post(url, content=body, headers=headers, timeout=timeout_sec)
-        return response.status_code, response.text[:5000]
+        response = await client.post(url, content=body, headers=headers, timeout=timeout_sec, follow_redirects=False)
+        if response.status_code in (301, 302, 303, 307, 308):
+            return response.status_code, "Redirects are not followed for webhook deliveries"
+        return response.status_code, response.text[:MAX_RESPONSE_BODY_CHARS]
     except httpx.TimeoutException:
         return 408, "Request timed out"
     except httpx.RequestError as e:
@@ -84,7 +115,20 @@ async def send_audit_event(event_type: str, details: dict):
 
 
 async def close_client():
-    global _http_client
-    if _http_client:
-        await _http_client.aclose()
-        _http_client = None
+    key = _loop_key()
+    with _clients_lock:
+        client = _clients.pop(key, None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
+
+async def close_all_clients():
+    with _clients_lock:
+        clients = list(_clients.values())
+        _clients.clear()
+    for client in clients:
+        if not client.is_closed:
+            try:
+                await client.aclose()
+            except Exception as e:
+                logger.warning(f"Failed to close webhook client: {e}")

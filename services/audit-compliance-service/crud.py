@@ -98,6 +98,23 @@ def resolve_tenant(data: dict, context_tenant: Optional[str] = None) -> str:
     return body_tenant
 
 
+class MassAssignmentError(ValueError):
+    pass
+
+
+def apply_updates(obj, data: dict[str, Any], allowed_fields: set):
+    unknown = [k for k in data.keys() if k not in allowed_fields]
+    if unknown:
+        raise MassAssignmentError(f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
+    for key in allowed_fields:
+        if key in data and data[key] is not None:
+            setattr(obj, key, data[key])
+    return obj
+
+
+COMPLIANCE_POLICY_UPDATE_FIELDS = frozenset({"name", "description", "category", "severity", "rules", "enabled"})
+
+
 # ── Audit Logs ──────────────────────────────────────────────────────────────
 
 def create_audit_log(db: Session, data: dict[str, Any], salt: str) -> AuditLog:
@@ -322,9 +339,7 @@ def update_policy(db: Session, policy_id: UUID, data: dict[str, Any]) -> Optiona
     policy = get_policy(db, policy_id)
     if not policy:
         return None
-    for key, value in data.items():
-        if value is not None and hasattr(policy, key):
-            setattr(policy, key, value)
+    apply_updates(policy, data, COMPLIANCE_POLICY_UPDATE_FIELDS)
     policy.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(policy)

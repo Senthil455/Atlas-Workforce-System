@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 T = TypeVar("T")
 
 class ZeroTrustPolicyCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     name: str = Field(..., max_length=200)
     description: Optional[str] = None
@@ -13,6 +15,17 @@ class ZeroTrustPolicyCreate(BaseModel):
     priority: int = 100
     conditions: dict[str, Any] = {}
     actions: dict[str, Any] = {}
+
+
+class ZeroTrustPolicyUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    name: Optional[str] = Field(None, max_length=200)
+    description: Optional[str] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = None
+    conditions: Optional[dict[str, Any]] = None
+    actions: Optional[dict[str, Any]] = None
 
 class ZeroTrustPolicyResponse(BaseModel):
     id: UUID
@@ -28,6 +41,8 @@ class ZeroTrustPolicyResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class ConditionalAccessCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     name: str = Field(..., max_length=200)
     description: Optional[str] = None
@@ -35,6 +50,17 @@ class ConditionalAccessCreate(BaseModel):
     conditions: dict[str, Any] = {}
     grant_controls: dict[str, Any] = {}
     session_controls: dict[str, Any] = {}
+
+
+class ConditionalAccessUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    name: Optional[str] = Field(None, max_length=200)
+    description: Optional[str] = None
+    enabled: Optional[bool] = None
+    conditions: Optional[dict[str, Any]] = None
+    grant_controls: Optional[dict[str, Any]] = None
+    session_controls: Optional[dict[str, Any]] = None
 
 class ConditionalAccessResponse(BaseModel):
     id: UUID
@@ -75,6 +101,8 @@ class RiskAssessmentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class PrivilegedRoleCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     name: str = Field(..., max_length=200)
     description: Optional[str] = None
@@ -125,6 +153,8 @@ class PrivilegedAccessResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class DataClassificationCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     resource_type: str = Field(..., max_length=100)
     resource_pattern: Optional[str] = None
@@ -151,6 +181,8 @@ class DataClassificationResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class DLPPolicyCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     name: str = Field(..., max_length=200)
     description: Optional[str] = None
@@ -173,6 +205,8 @@ class DLPPolicyResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class DLPIncidentCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     policy_id: Optional[UUID] = None
     user_id: Optional[str] = Field(None, max_length=100)
@@ -183,6 +217,7 @@ class DLPIncidentCreate(BaseModel):
     description: Optional[str] = None
     severity: Optional[str] = Field(None, max_length=20)
     evidence: Optional[dict[str, Any]] = None
+
 
 class DLPIncidentResponse(BaseModel):
     id: UUID
@@ -202,6 +237,8 @@ class DLPIncidentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class EncryptionKeyCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     key_id: str = Field(..., max_length=100)
     algorithm: str = "AES-256-GCM"
@@ -224,6 +261,8 @@ class EncryptionKeyResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class DataResidencyCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     region: str = Field(..., max_length=100)
     resource_type: str = Field(..., max_length=100)
@@ -247,6 +286,8 @@ class DataResidencyResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class SessionRecordingCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     tenant_id: str = Field(..., max_length=50)
     user_id: str = Field(..., max_length=100)
     session_id: Optional[str] = Field(None, max_length=100)
@@ -255,6 +296,7 @@ class SessionRecordingCreate(BaseModel):
     events: list[dict[str, Any]] = []
     ip_address: Optional[str] = Field(None, max_length=45)
     user_agent: Optional[str] = None
+
 
 class SessionRecordingEvent(BaseModel):
     event_type: str = Field(..., max_length=50)

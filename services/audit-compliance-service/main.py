@@ -18,6 +18,7 @@ from atlas_observability import (
 )
 
 from crud import (
+    MassAssignmentError,
     configure_hash_salt,
     create_audit_log,
     create_policy,
@@ -406,7 +407,10 @@ async def update_compliance_policy(
     payload: CompliancePolicyUpdate,
     db: Session = Depends(get_db),
 ):
-    updated = update_policy(db, policy_id, payload.model_dump(exclude_unset=True))
+    try:
+        updated = update_policy(db, policy_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=404, detail="Policy not found")
     return updated

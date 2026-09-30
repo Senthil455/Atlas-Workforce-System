@@ -16,6 +16,8 @@ type AttendanceRecord struct {
 	ClockOut      *time.Time `json:"clockOut"`
 	Status        string     `json:"status"`
 	Overtime      float64    `json:"overtime"`
+	OvertimeCapped bool      `json:"overtimeCapped"`
+	OvertimeMultiplier float64 `json:"overtimeMultiplier"`
 	Method        string     `json:"method"`
 	ShiftID       *uint      `json:"shiftId"`
 	Latitude      *float64   `json:"latitude"`
@@ -59,6 +61,7 @@ type Shift struct {
 	EndTime       string `json:"endTime"`
 	GraceMinutes  int    `json:"graceMinutes"`
 	MaxOvertime   float64 `json:"maxOvertime"`
+	OvertimeMultiplier float64 `json:"overtimeMultiplier"`
 	IsNightShift  bool   `json:"isNightShift"`
 	IsActive      bool   `json:"isActive"`
 	DaysOfWeek    string `json:"daysOfWeek"`
