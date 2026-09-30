@@ -88,10 +88,17 @@ SEARCH_ALLOWED_CHARS = re.compile(r"^[a-zA-Z0-9 @._\-]+$")
 async def lifespan(app: FastAPI):
     log_event("info", "service.starting", mongo_url=sanitize_url(MONGO_URL))
     try:
-        await employees_collection.create_index("email", unique=True)
+        # Migration: email used to be globally unique, but identity is per
+        # tenant, so the unique key is (tenant_id, email). Drop the old
+        # global index first (missing on fresh installs - ignore that case).
+        try:
+            await employees_collection.drop_index("email_1")
+            log_event("info", "indexes.dropped_legacy_email_index")
+        except Exception:
+            pass
+        await employees_collection.create_index([("tenant_id", 1), ("email", 1)], unique=True)
         await employees_collection.create_index("name")
         await employees_collection.create_index("department")
-        await employees_collection.create_index([("tenant_id", 1), ("email", 1)])
         await employees_collection.create_index([("tenant_id", 1), ("name", 1)])
         await employees_collection.create_index([("tenant_id", 1), ("department", 1), ("position", 1)])
         log_event("info", "indexes.created")
@@ -335,7 +342,7 @@ async def create_employee(
     except pymongo.errors.DuplicateKeyError:
         log_event("warning", "employee.duplicate_email", email=employee.email, tenant_id=tenant_id)
         raise HTTPException(
-            status_code=400, detail="Employee with this email already exists"
+            status_code=409, detail="Employee with this email already exists in this tenant"
         )
 
 
