@@ -42,6 +42,17 @@ const httpRequestsInProgress = new promClient.Gauge({
   labelNames: ['method', 'path'],
 });
 
+const auditDeliveryFailuresTotal = new promClient.Counter({
+  name: 'atlas_audit_delivery_failures_total',
+  help: 'Total audit log delivery failures from auth-service',
+  labelNames: ['event_type'],
+});
+const authFailedLoginTotal = new promClient.Counter({
+  name: 'atlas_auth_failed_login_total',
+  help: 'Total failed login attempts',
+  labelNames: ['known_user'],
+});
+
 promClient.collectDefaultMetrics();
 
 const app = express();
@@ -93,11 +104,85 @@ const REFRESH_EXPIRY_DAYS = 7;
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || 'http://audit-compliance-service:8011';
-const AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY;
+const INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET;
+const AUDIT_WRITER_AUDIENCE = 'audit-writer';
 const SAML_IDP_SSO_URL = process.env.SAML_IDP_SSO_URL || 'https://idp.example.com/sso';
 const SAML_IDP_ENTITY_ID = process.env.SAML_IDP_ENTITY_ID || 'https://idp.example.com/metadata';
 const SAML_IDP_CERT = (process.env.SAML_IDP_CERT || '').replace(/\\n/g, '\n');
 const SCIM_API_KEY = process.env.SCIM_API_KEY;
+const SCIM_ALLOWED_ROLES = ['employee'];
+
+function parseScimApiKeys() {
+  const raw = process.env.SCIM_API_KEYS || '';
+  const map = new Map();
+  if (!raw || !raw.trim()) return map;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const obj = JSON.parse(trimmed);
+      for (const [tenant, key] of Object.entries(obj)) {
+        if (typeof tenant === 'string' && typeof key === 'string' && tenant.trim() && key) {
+          map.set(tenant.trim(), key);
+        }
+      }
+      return map;
+    } catch {
+      // Fall through to comma-separated parsing
+    }
+  }
+  for (const entry of trimmed.split(',')) {
+    const part = entry.trim();
+    if (!part) continue;
+    const sepIdx = part.search(/[:=]/);
+    if (sepIdx === -1) continue;
+    const tenant = part.slice(0, sepIdx).trim();
+    const key = part.slice(sepIdx + 1).trim();
+    if (tenant && key) map.set(tenant, key);
+  }
+  return map;
+}
+
+const SCIM_TENANT_KEYS = parseScimApiKeys();
+
+if (SCIM_TENANT_KEYS.size === 0) {
+  console.warn('WARNING: SCIM_API_KEYS is not set; legacy SCIM_API_KEY is scoped to the default tenant only. Set SCIM_API_KEYS to provision other tenants.');
+}
+
+function scimTimingSafeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  try {
+    return crypto.timingSafeEqual(ab, bb);
+  } catch {
+    return false;
+  }
+}
+
+function resolveScimTenant(providedKey) {
+  if (!providedKey || typeof providedKey !== 'string') return null;
+  for (const [tenant, key] of SCIM_TENANT_KEYS.entries()) {
+    if (scimTimingSafeEqual(providedKey, key)) return tenant;
+  }
+  if (SCIM_API_KEY && scimTimingSafeEqual(providedKey, SCIM_API_KEY)) {
+    return 'default';
+  }
+  return null;
+}
+
+function getScimKeyId(providedKey, tenant) {
+  try {
+    const hash = crypto.createHash('sha256').update(String(providedKey)).digest('hex').slice(0, 8);
+    return `scim:${tenant || 'unknown'}:${hash}`;
+  } catch {
+    return `scim:${tenant || 'unknown'}`;
+  }
+}
+
+function isAllowedScimRole(role) {
+  return typeof role === 'string' && SCIM_ALLOWED_ROLES.includes(role);
+}
 
 if (!JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is required');
@@ -109,8 +194,8 @@ if (!ADMIN_DEFAULT_PASSWORD) {
   process.exit(1);
 }
 
-if (!AUDIT_INTERNAL_KEY) {
-  console.error('FATAL: AUDIT_INTERNAL_KEY environment variable is required');
+if (!INTERNAL_JWT_SECRET) {
+  console.error('FATAL: INTERNAL_JWT_SECRET environment variable is required');
   process.exit(1);
 }
 
@@ -306,6 +391,24 @@ function validatePassword(password) {
   return null;
 }
 
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function validateEmail(email) {
+  if (!email || typeof email !== 'string') {
+    return 'Email is required';
+  }
+  const normalized = normalizeEmail(email);
+  if (normalized.length > 254) {
+    return 'Email is too long';
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    return 'Email format is invalid';
+  }
+  return null;
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -405,31 +508,61 @@ async function revokeAllUserSessions(userId) {
   await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
 }
 
+function normalizeFailedAttemptEmail(email) {
+  return String(email || '').trim().toLowerCase().slice(0, 255);
+}
+async function issueLoginSession(user, req, res) {
+  const sessionId = uuidv4();
+  const accessToken = signAccessToken(user, sessionId);
+  const refreshToken = await createRefreshToken(user.id);
+  const deviceId = req.headers?.['x-device-id'] || null;
+  await pool.query(
+    `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
+    [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers?.['user-agent'] || '', deviceId,
+     new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
+  );
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+  });
+  return { sessionId, accessToken, refreshToken };
+}
+
 async function recordFailedAttempt(email) {
+  const key = normalizeFailedAttemptEmail(email);
+  if (!key) return;
   const lockedUntil = new Date();
   lockedUntil.setMinutes(lockedUntil.getMinutes() + LOCKOUT_MINUTES);
 
   await pool.query(
-    `INSERT INTO failed_attempts (email, attempts, locked_until)
-     VALUES ($1, 1, NULL)
+    `INSERT INTO failed_attempts (email, attempts, locked_until, updated_at)
+     VALUES ($1, 1, NULL, NOW())
      ON CONFLICT (email) DO UPDATE SET
        attempts = failed_attempts.attempts + 1,
        locked_until = CASE
          WHEN failed_attempts.attempts + 1 >= $2 THEN $3
          ELSE failed_attempts.locked_until
-       END`,
-    [email, MAX_FAILED_ATTEMPTS, lockedUntil]
+       END,
+       updated_at = NOW()`,
+    [key, MAX_FAILED_ATTEMPTS, lockedUntil]
   );
 }
 
 async function clearFailedAttempts(email) {
-  await pool.query('DELETE FROM failed_attempts WHERE email = $1', [email]);
+  const key = normalizeFailedAttemptEmail(email);
+  if (!key) return;
+  await pool.query('DELETE FROM failed_attempts WHERE email = $1', [key]);
 }
 
 async function isAccountLocked(email) {
+  const key = normalizeFailedAttemptEmail(email);
+  if (!key) return false;
   const result = await pool.query(
-    'SELECT attempts, locked_until FROM failed_attempts WHERE email = $1',
-    [email]
+    'SELECT attempts, locked_until, updated_at FROM failed_attempts WHERE email = $1',
+    [key]
   );
   const row = result.rows[0];
   if (!row) return false;
@@ -437,8 +570,15 @@ async function isAccountLocked(email) {
     return true;
   }
   if (row.locked_until && new Date(row.locked_until) <= new Date()) {
-    await pool.query('DELETE FROM failed_attempts WHERE email = $1', [email]);
+    await pool.query('DELETE FROM failed_attempts WHERE email = $1', [key]);
     return false;
+  }
+  if (!row.locked_until && row.updated_at) {
+    const ageMs = Date.now() - new Date(row.updated_at).getTime();
+    if (ageMs > 60 * 60 * 1000) {
+      await pool.query('DELETE FROM failed_attempts WHERE email = $1', [key]);
+      return false;
+    }
   }
   return false;
 }
@@ -480,20 +620,16 @@ function requireRole(...roles) {
 }
 
 function requireScimAuth(req, res, next) {
+  // SCIM provisioning must use a dedicated provisioning credential.
+  // Regular user JWTs are rejected here so an employee session can never
+  // list or modify users through the SCIM surface.
   const apiKey = req.headers['x-api-key'];
-  const authHeader = req.headers.authorization;
-
-  if (apiKey && apiKey === SCIM_API_KEY) {
-    return next();
-  }
-
-  if (authHeader?.startsWith('Bearer ')) {
-    try {
-      const payload = jwt.verify(authHeader.slice(7), jwtSecret, { algorithms: ['HS256'] });
-      req.user = payload;
+  if (typeof apiKey === 'string' && apiKey.length > 0) {
+    const tenant = resolveScimTenant(apiKey);
+    if (tenant) {
+      req.scimTenant = tenant;
+      req.scimKeyId = getScimKeyId(apiKey, tenant);
       return next();
-    } catch {
-      // Fall through to error
     }
   }
 
@@ -621,22 +757,77 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
-async function sendAuditEvent(eventType, userId, email, details = {}) {
+function mintAuditWriterToken() {
+  return jwt.sign(
+    {
+      sub: 'auth-service',
+      service: 'auth-service',
+      tenant_id: 'default',
+      aud: AUDIT_WRITER_AUDIENCE,
+    },
+    INTERNAL_JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '60s' }
+  );
+}
+setInterval(async () => {
   try {
-    await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, {
-      event_type: eventType,
-      user_id: userId,
-      email,
-      timestamp: new Date().toISOString(),
-      details,
-      service: 'auth-service'
-    }, {
-      headers: { 'X-Internal-Key': AUDIT_INTERNAL_KEY },
-      timeout: 3000
-    });
+    await pool.query("DELETE FROM failed_attempts WHERE locked_until IS NULL AND updated_at < NOW() - INTERVAL '1 hour'");
+    await pool.query('DELETE FROM failed_attempts WHERE locked_until IS NOT NULL AND locked_until < NOW()');
   } catch (err) {
-    console.error(`Audit log failed for ${eventType}:`, err.message);
+    console.error('Failed to sweep stale failed_attempts rows:', err.message);
   }
+}, 10 * 60 * 1000);
+
+async function sendAuditEvent(eventType, userId, email, details = {}) {
+  const payload = {
+    event_type: eventType,
+    user_id: userId,
+    email,
+    timestamp: new Date().toISOString(),
+    details,
+    service: 'auth-service'
+  };
+  const delaysMs = [0, 300];
+  for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    if (delaysMs[attempt]) await new Promise((r) => setTimeout(r, delaysMs[attempt]));
+    try {
+      await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, payload, {
+        headers: { 'x-internal-auth': mintAuditWriterToken() },
+        timeout: 3000
+      });
+      return;
+    } catch (err) {
+      if (attempt === delaysMs.length - 1) {
+        try { auditDeliveryFailuresTotal.labels({ event_type: eventType }).inc(); } catch {}
+        console.error(`Audit log failed for ${eventType}:`, err.message);
+      }
+    }
+  }
+}
+
+function getFrontendUrl() {
+  return (process.env.FRONTEND_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+}
+
+// Email sender abstraction. No SMTP is configured in this repo, so the
+// default implementation is a no-op that logs the message. This keeps the
+// password reset flow testable in development without an SMTP server.
+// If SMTP settings are provided via env, this function is the single
+// place to plug in a real transport.
+async function sendEmail({ to, subject, text }) {
+  try {
+    console.log(`[email] to=${to} subject=${subject} body=${text}`);
+    return true;
+  } catch (err) {
+    console.error('Email send failed:', err.message);
+    return false;
+  }
+}
+
+async function sendPasswordResetEmail(email, rawToken, resetUrl) {
+  const subject = 'Reset your Atlas password';
+  const text = `You requested a password reset for your Atlas account.\n\nReset link (valid for 1 hour, single use): ${resetUrl}\n\nIf you did not request this, you can ignore this email.`;
+  return sendEmail({ to: email, subject, text });
 }
 
 function formatScimUser(user, baseUrl) {
@@ -726,9 +917,19 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS failed_attempts (
       email VARCHAR(255) PRIMARY KEY,
       attempts INTEGER DEFAULT 0,
-      locked_until TIMESTAMP
+      locked_until TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  try {
+    await pool.query('ALTER TABLE failed_attempts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()');
+  } catch (err) { /* column may exist */ }
+  try {
+    await pool.query('UPDATE failed_attempts SET updated_at = NOW() WHERE updated_at IS NULL');
+  } catch (err) { /* best effort backfill */ }
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_failed_attempts_locked_until ON failed_attempts (locked_until)');
+  } catch (err) { /* index may exist */ }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_mfa (
@@ -784,6 +985,17 @@ async function initDB() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash VARCHAR(64) NOT NULL UNIQUE,
+      expires_at TIMESTAMP NOT NULL,
+      used BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS webauthn_credentials (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -798,6 +1010,22 @@ async function initDB() {
       last_used_at TIMESTAMP
     );
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      challenge TEXT NOT NULL UNIQUE,
+      purpose VARCHAR(20) NOT NULL DEFAULT 'registration',
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user ON webauthn_challenges (user_id, purpose, expires_at);`);
+  // Cleanup legacy challenge rows that were stored as pseudo-credentials.
+  try {
+    await pool.query(`DELETE FROM webauthn_credentials WHERE credential_id LIKE 'challenge:%'`);
+  } catch (e) { /* ignore if cleanup fails on older schemas */ }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS oauth_providers (
@@ -892,18 +1120,28 @@ initDB().catch((err) => {
 });
 
 app.post('/register', createUserRateLimiter('register', 10, 15 * 60 * 1000, { keyByEmail: true }), async (req, res) => {
-  const { email, password, name, department, position, tenant_id } = req.body;
+  const { email, password, name, department, position } = req.body;
   if (!email || !password || !name) {
     return res.status(400).json({ message: 'Email, password, and name are required' });
   }
+
+  const emailError = validateEmail(email);
+  if (emailError) {
+    return res.status(400).json({ message: emailError });
+  }
+  const normalizedEmail = normalizeEmail(email);
 
   const passwordError = validatePassword(password);
   if (passwordError) {
     return res.status(400).json({ message: passwordError });
   }
 
+  // Tenant is always assigned server-side. Joining an existing tenant
+  // requires an invite/admin flow, never a client-supplied tenant_id.
+  const tenantId = 'default';
+
   try {
-    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
     if (userExists.rows.length > 0) {
       return res.status(400).json({ message: 'User already exists' });
     }
@@ -912,19 +1150,19 @@ app.post('/register', createUserRateLimiter('register', 10, 15 * 60 * 1000, { ke
     const result = await pool.query(
       'INSERT INTO users (email, password, name, role, department, position, tenant_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, name, role, department, position, tenant_id',
       [
-        email,
+        normalizedEmail,
         hashedPassword,
         name,
         'employee',
         department || 'General',
         position || 'Staff',
-        tenant_id || 'default'
+        tenantId
       ]
     );
 
-    await sendAuditEvent('auth.register', result.rows[0].id, email, {
+    await sendAuditEvent('auth.register', result.rows[0].id, normalizedEmail, {
       role: 'employee',
-      tenant_id: tenant_id || 'default'
+      tenant_id: tenantId
     });
 
     res.status(201).json({
@@ -946,18 +1184,20 @@ app.post('/login', createUserRateLimiter('login', 20, 15 * 60 * 1000, { keyByEma
     return res.status(400).json({ message: 'Email and password are required' });
   }
 
+  const normalizedEmail = normalizeEmail(email);
+
   try {
-    if (await isAccountLocked(email)) {
+    if (await isAccountLocked(normalizedEmail)) {
       return res.status(423).json({
         message: `Account locked. Try again in ${LOCKOUT_MINUTES} minutes.`,
       });
     }
 
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
     const user = result.rows[0];
 
     if (!user) {
-      await recordFailedAttempt(email);
+      authFailedLoginTotal.labels({ known_user: 'false' }).inc();
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
@@ -967,11 +1207,12 @@ app.post('/login', createUserRateLimiter('login', 20, 15 * 60 * 1000, { keyByEma
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      await recordFailedAttempt(email);
+      await recordFailedAttempt(normalizedEmail);
+      authFailedLoginTotal.labels({ known_user: 'true' }).inc();
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    await clearFailedAttempts(email);
+    await clearFailedAttempts(normalizedEmail);
 
     const deviceId = req.headers['x-device-id'];
     const deviceFingerprint = req.headers['x-device-fingerprint'];
@@ -1026,23 +1267,7 @@ app.post('/login', createUserRateLimiter('login', 20, 15 * 60 * 1000, { keyByEma
       });
     }
 
-    const sessionId = uuidv4();
-    const token = signAccessToken(user, sessionId);
-    const refreshToken = await createRefreshToken(user.id);
-
-    await pool.query(
-      `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
-      [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', deviceId || null,
-       new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
-    );
-
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-    });
+    const { sessionId, accessToken: token } = await issueLoginSession(user, req, res);
 
     await sendAuditEvent('auth.login', user.id, email, {
       device_trusted: deviceTrusted,
@@ -1405,21 +1630,7 @@ app.post('/mfa/validate', createUserRateLimiter('mfa_validate', 10), async (req,
 
     if (isChallengeFlow) {
       // Issue full session for login completion
-      const accessToken = signAccessToken(user);
-      const refreshToken = await createRefreshToken(user.id);
-      const sessionId = uuidv4();
-      await pool.query(
-        `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, device_id, is_active, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, true, $7)`,
-        [sessionId, user.id, hashToken(refreshToken), req.ip, req.headers['user-agent'] || '', req.headers['x-device-id'] || null,
-         new Date(Date.now() + REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000)]
-      );
-      res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
-      });
+      const { sessionId, accessToken } = await issueLoginSession(user, req, res);
       await sendAuditEvent('auth.mfa_validate', userId, user.email, { method, mfa_challenge: true });
       return res.json({
         message: 'MFA validated, logged in successfully',
@@ -1640,12 +1851,16 @@ app.post('/devices/verify', requireRole(), createUserRateLimiter('device_verify'
 
 app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const count = Math.min(parseInt(req.query.count) || 10, 100);
     const startIndex = Math.max(parseInt(req.query.startIndex) || 1, 1);
     const offset = startIndex - 1;
 
-    let whereClause = '';
-    let queryParams = [];
+    let whereClause = 'WHERE tenant_id = $1';
+    let queryParams = [tenant];
 
     if (req.query.filter) {
       const userNameMatch = req.query.filter.match(/userName\s+eq\s+"([^"]+)"/i);
@@ -1653,7 +1868,7 @@ app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30
       const filterValue = userNameMatch?.[1] || emailMatch?.[1];
 
       if (filterValue) {
-        whereClause = 'WHERE email = $1';
+        whereClause += ` AND email = $${queryParams.length + 1}`;
         queryParams.push(filterValue);
       }
     }
@@ -1686,7 +1901,11 @@ app.get('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_list', 30
 
 app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create', 20), async (req, res) => {
   try {
-    const { userName, name, emails, roles, active, externalId } = req.body;
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
+    const { userName, name, emails, roles, active, externalId, password } = req.body;
 
     if (!userName) {
       return sendScimError(res, 400, 'userName is required');
@@ -1696,7 +1915,11 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
     const givenName = name?.givenName || '';
     const familyName = name?.familyName || '';
     const displayName = name?.formatted || `${givenName} ${familyName}`.trim() || email;
-    const role = roles?.[0]?.value || 'employee';
+    const requestedRole = roles?.[0]?.value;
+    if (requestedRole && !isAllowedScimRole(requestedRole)) {
+      return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+    }
+    const role = 'employee';
     const userActive = active !== undefined ? active : true;
 
     const exists = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -1704,12 +1927,24 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
       return sendScimError(res, 409, 'User already exists');
     }
 
-    const tempPassword = crypto.randomBytes(16).toString('hex');
-    const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_COST);
+    let passwordToHash;
+    if (password && typeof password === 'string' && password.length > 0) {
+      const passwordError = validatePassword(password);
+      if (passwordError) {
+        return sendScimError(res, 400, passwordError);
+      }
+      passwordToHash = password;
+    } else {
+      // No usable credential is emailed for generated passwords, so the
+      // account must be activated via POST /auth/password/reset-request
+      // or POST /auth/admin/password-reset.
+      passwordToHash = crypto.randomBytes(16).toString('hex');
+    }
+    const hashedPassword = await bcrypt.hash(passwordToHash, BCRYPT_COST);
 
     const result = await pool.query(
-      'INSERT INTO users (email, password, name, role, active) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [email, hashedPassword, displayName, role, userActive]
+      'INSERT INTO users (email, password, name, role, active, tenant_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [email, hashedPassword, displayName, role, userActive, tenant]
     );
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -1717,7 +1952,10 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
 
     await sendAuditEvent('scim.user_created', result.rows[0].id, email, {
       method: 'scim',
-      source: externalId || 'SCIM provisioned'
+      source: externalId || 'SCIM provisioned',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`,
+      role
     });
 
     res.status(201).json(scimUser);
@@ -1732,7 +1970,11 @@ app.post('/scim/v2/Users', requireScimAuth, createUserRateLimiter('scim_create',
 
 app.get('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_get', 60), async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
+    const result = await pool.query('SELECT * FROM users WHERE id = $1 AND tenant_id = $2', [req.params.id, tenant]);
     if (!result.rows[0]) {
       return sendScimError(res, 404, 'User not found');
     }
@@ -1747,6 +1989,10 @@ app.get('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_get',
 
 app.put('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_update', 20), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const { userName, name, emails, roles, active } = req.body;
 
     const email = emails?.[0]?.value || userName;
@@ -1754,6 +2000,9 @@ app.put('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_updat
     const familyName = name?.familyName || '';
     const displayName = name?.formatted || `${givenName} ${familyName}`.trim() || email;
     const role = roles?.[0]?.value;
+    if (role && !isAllowedScimRole(role)) {
+      return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+    }
 
     const updateFields = [];
     const updateValues = [];
@@ -1770,23 +2019,37 @@ app.put('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_updat
     }
 
     updateValues.push(req.params.id);
-    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx} RETURNING *`;
+    updateValues.push(tenant);
+    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx++} AND tenant_id = $${paramIdx} RETURNING *`;
 
     const result = await pool.query(query, updateValues);
     if (!result.rows[0]) {
       return sendScimError(res, 404, 'User not found');
     }
 
+    await sendAuditEvent('scim.user_updated', result.rows[0].id, result.rows[0].email, {
+      method: 'scim',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`
+    });
+
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json(formatScimUser(result.rows[0], baseUrl));
   } catch (err) {
     console.error(err);
+    if (err.code === '23505') {
+      return sendScimError(res, 409, 'User already exists');
+    }
     return sendScimError(res, 500, 'Internal error');
   }
 });
 
 app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_patch', 20), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const { Operations } = req.body;
     if (!Operations || !Array.isArray(Operations)) {
       return sendScimError(res, 400, 'Operations array is required');
@@ -1807,7 +2070,10 @@ app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_pat
         } else if (op.path === 'emails[0].value' || op.path === 'userName') {
           updateFields.push(`email = $${paramIdx++}`);
           updateValues.push(op.value);
-        } else if (op.path === 'roles[0].value') {
+        } else if (op.path === 'roles[0].value' || op.path === 'role') {
+          if (!isAllowedScimRole(op.value)) {
+            return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+          }
           updateFields.push(`role = $${paramIdx++}`);
           updateValues.push(op.value);
         } else if (!op.path && op.value && typeof op.value === 'object') {
@@ -1824,8 +2090,18 @@ app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_pat
             updateValues.push(op.value.emails[0].value);
           }
           if (op.value.roles?.[0]?.value) {
+            if (!isAllowedScimRole(op.value.roles[0].value)) {
+              return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+            }
             updateFields.push(`role = $${paramIdx++}`);
             updateValues.push(op.value.roles[0].value);
+          }
+          if (op.value.role && typeof op.value.role === 'string') {
+            if (!isAllowedScimRole(op.value.role)) {
+              return sendScimError(res, 400, 'Invalid role. Only employee provisioning is allowed via SCIM.');
+            }
+            updateFields.push(`role = $${paramIdx++}`);
+            updateValues.push(op.value.role);
           }
           if (op.value.userName) {
             updateFields.push(`email = $${paramIdx++}`);
@@ -1841,27 +2117,41 @@ app.patch('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_pat
 
     updateFields.push('updated_at = NOW()');
     updateValues.push(req.params.id);
+    updateValues.push(tenant);
 
-    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx} RETURNING *`;
+    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramIdx++} AND tenant_id = $${paramIdx} RETURNING *`;
 
     const result = await pool.query(query, updateValues);
     if (!result.rows[0]) {
       return sendScimError(res, 404, 'User not found');
     }
 
+    await sendAuditEvent('scim.user_updated', result.rows[0].id, result.rows[0].email, {
+      method: 'scim',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`
+    });
+
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json(formatScimUser(result.rows[0], baseUrl));
   } catch (err) {
     console.error(err);
+    if (err.code === '23505') {
+      return sendScimError(res, 409, 'User already exists');
+    }
     return sendScimError(res, 500, 'Internal error');
   }
 });
 
 app.delete('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_delete', 10), async (req, res) => {
   try {
+    const tenant = req.scimTenant;
+    if (!tenant) {
+      return sendScimError(res, 401, 'Authentication required');
+    }
     const result = await pool.query(
-      'UPDATE users SET active = false, updated_at = NOW() WHERE id = $1 RETURNING id',
-      [req.params.id]
+      'UPDATE users SET active = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [req.params.id, tenant]
     );
 
     if (!result.rows[0]) {
@@ -1869,7 +2159,9 @@ app.delete('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_de
     }
 
     await sendAuditEvent('scim.user_deactivated', parseInt(req.params.id), null, {
-      method: 'scim'
+      method: 'scim',
+      tenant_id: tenant,
+      actor: req.scimKeyId || `scim:${tenant}`
     });
 
     res.status(204).send();
@@ -2043,16 +2335,17 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const token = signAccessToken(userData);
-    const refreshToken = await createRefreshToken(userData.id);
+    const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
     await sendAuditEvent('auth.saml_login', userData.id, email, {
-      ip_address: req.ip
+      ip_address: req.ip,
+      session_id: sessionId
     });
 
     res.json({
       message: 'SAML login successful',
       token,
+      session_id: sessionId,
       user: sanitizeUser(userData)
     });
   } catch (err) {
@@ -2161,19 +2454,158 @@ app.post('/auth/passwordless/verify', createUserRateLimiter('passwordless_verify
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const accessToken = signAccessToken(user);
-    const refreshToken = await createRefreshToken(user.id);
+    const { sessionId, accessToken } = await issueLoginSession(user, req, res);
 
-    await sendAuditEvent('auth.passwordless_login', user.id, user.email);
+    await sendAuditEvent('auth.passwordless_login', user.id, user.email, {
+      session_id: sessionId
+    });
 
     res.json({
       message: 'Logged in successfully',
       token: accessToken,
+      session_id: sessionId,
       user: sanitizeUser(user)
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Magic link verification failed' });
+  }
+});
+
+// Request a password reset. Always returns 200 with a generic message so
+// callers cannot enumerate accounts. The raw token is emailed via the
+// email sender abstraction and only the SHA-256 hash is stored.
+app.post('/auth/password/reset-request', createUserRateLimiter('password_reset_request', 5), async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const normalizedEmail = email.trim();
+    const genericMessage = 'If an account exists for this email, a reset link has been sent.';
+
+    const userResult = await pool.query('SELECT id, email, active FROM users WHERE email = $1', [normalizedEmail]);
+    const user = userResult.rows[0];
+
+    if (!user || !user.active) {
+      await sendAuditEvent('auth.password_reset_requested', user?.id || null, normalizedEmail, { found: false });
+      return res.json({ message: genericMessage });
+    }
+
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1 OR expires_at <= NOW()', [user.id]);
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetUrl = `${getFrontendUrl()}/reset-password?token=${rawToken}`;
+    await sendPasswordResetEmail(user.email, rawToken, resetUrl);
+    await sendAuditEvent('auth.password_reset_requested', user.id, user.email, { found: true });
+
+    const response = { message: genericMessage };
+    if (NODE_ENV !== 'production') {
+      response.reset_token = rawToken;
+      response.reset_url = resetUrl;
+    }
+    return res.json(response);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to process reset request' });
+  }
+});
+
+// Complete a password reset with a single-use token. Revokes all sessions
+// on success so stolen tokens cannot be reused.
+app.post('/auth/password/reset', createUserRateLimiter('password_reset', 10), async (req, res) => {
+  try {
+    const { token, password, new_password } = req.body;
+    const newPassword = password || new_password;
+    if (!token || !newPassword) {
+      return res.status(400).json({ message: 'Token and new password are required' });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
+
+    const tokenHash = hashToken(String(token).trim());
+    const tokenResult = await pool.query(
+      'SELECT * FROM password_reset_tokens WHERE token_hash = $1 AND used = false AND expires_at > NOW()',
+      [tokenHash]
+    );
+    const resetRow = tokenResult.rows[0];
+    if (!resetRow) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [resetRow.user_id]);
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+    if (!user.active) {
+      return res.status(403).json({ message: 'Account is deactivated' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashedPassword, user.id]);
+    await pool.query('UPDATE password_reset_tokens SET used = true WHERE token_hash = $1', [tokenHash]);
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND token_hash != $2', [user.id, tokenHash]);
+
+    await revokeAllUserSessions(user.id);
+    await clearFailedAttempts(user.email);
+    await sendAuditEvent('auth.password_reset', user.id, user.email, {});
+
+    return res.json({ message: 'Password has been reset successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Password reset failed' });
+  }
+});
+
+// Admin-only reset for SCIM provisioned or locked-out accounts.
+app.post('/auth/admin/password-reset', requireRole('admin'), createUserRateLimiter('admin_password_reset', 20), async (req, res) => {
+  try {
+    const { email, user_id, userId, password, new_password } = req.body;
+    const targetEmail = email;
+    const targetId = user_id || userId;
+    const newPassword = password || new_password;
+    if ((!targetEmail && !targetId) || !newPassword) {
+      return res.status(400).json({ message: 'Target email or user_id and a new password are required' });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
+    }
+
+    const lookup = targetId
+      ? await pool.query('SELECT * FROM users WHERE id = $1', [targetId])
+      : await pool.query('SELECT * FROM users WHERE email = $1', [targetEmail]);
+
+    const user = lookup.rows[0];
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashedPassword, user.id]);
+    await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [user.id]);
+
+    await revokeAllUserSessions(user.id);
+    await clearFailedAttempts(user.email);
+    await sendAuditEvent('auth.admin_password_reset', user.id, user.email, { admin_id: req.user.id });
+
+    return res.json({ message: 'Password reset successfully', user: sanitizeUser({ ...user }) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Admin password reset failed' });
   }
 });
 
@@ -2302,19 +2734,56 @@ function base64urlToBase64(base64url) {
   return base64urlToBuffer(base64url).toString('base64');
 }
 
-async function storeChallenge(userId, challenge) {
+const WEBAUTHN_CHALLENGE_TTL_MINUTES = 5;
+
+async function storeWebauthnChallenge(userId, challenge, purpose) {
+  await pool.query(`DELETE FROM webauthn_challenges WHERE expires_at <= NOW()`);
   await pool.query(
-    'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, device_name, device_type) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (credential_id) DO NOTHING',
-    [userId, `challenge:${challenge}`, challenge, 'pending', 'pending']
+    `INSERT INTO webauthn_challenges (user_id, challenge, purpose, expires_at)
+     VALUES ($1, $2, $3, NOW() + ($4 || ' minutes')::INTERVAL)
+     ON CONFLICT (challenge) DO UPDATE SET user_id = EXCLUDED.user_id, purpose = EXCLUDED.purpose, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+    [userId, challenge, purpose, String(WEBAUTHN_CHALLENGE_TTL_MINUTES)]
   );
+}
+
+async function storeChallenge(userId, challenge, purpose = 'registration') {
+  return storeWebauthnChallenge(userId, challenge, purpose);
+}
+
+async function getLatestWebauthnChallenge(userId, purpose) {
+  const result = await pool.query(
+    `SELECT challenge FROM webauthn_challenges
+     WHERE user_id = $1 AND purpose = $2 AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId, purpose]
+  );
+  if (result.rows[0]) return result.rows[0].challenge;
+  // Fallback for in-flight challenges created before the migration.
+  const legacy = await pool.query(
+    `SELECT public_key AS challenge FROM webauthn_credentials
+     WHERE user_id = $1 AND credential_id LIKE 'challenge:%' AND device_name = 'pending'
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  return legacy.rows[0] ? legacy.rows[0].challenge : null;
+}
+
+async function consumeWebauthnChallenge(userId, purpose) {
+  await pool.query(`DELETE FROM webauthn_challenges WHERE user_id = $1 AND purpose = $2`, [userId, purpose]);
+  await pool.query(`DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%'`, [userId]);
 }
 
 async function consumeChallenge(userId, challenge) {
   const result = await pool.query(
+    'DELETE FROM webauthn_challenges WHERE user_id = $1 AND challenge = $2 RETURNING id',
+    [userId, challenge]
+  );
+  if (result.rowCount > 0) return true;
+  const legacy = await pool.query(
     'DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2 RETURNING id',
     [userId, `challenge:${challenge}`]
   );
-  return result.rowCount > 0;
+  return legacy.rowCount > 0;
 }
 
 app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
@@ -2326,7 +2795,7 @@ app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
     const user = userResult.rows[0];
 
     const existing = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true',
+      "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [userId]
     );
 
@@ -2341,7 +2810,7 @@ app.post('/webauthn/register/begin', requireRole(), async (req, res) => {
       })),
     });
 
-    await storeChallenge(userId, options.challenge);
+    await storeWebauthnChallenge(userId, options.challenge, 'registration');
 
     res.json({
       status: 'ok',
@@ -2363,16 +2832,11 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
       return res.status(400).json({ message: 'Invalid credential response' });
     }
 
-    const challengeRow = await pool.query(
-      'SELECT public_key as challenge FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE $2 AND device_name = $3',
-      [userId, 'challenge:%', 'pending']
-    );
+    const expectedChallenge = await getLatestWebauthnChallenge(userId, 'registration');
 
-    if (!challengeRow.rows[0]) {
+    if (!expectedChallenge) {
       return res.status(400).json({ message: 'No pending registration challenge found. Please start registration again.' });
     }
-
-    const expectedChallenge = challengeRow.rows[0].challenge;
 
     const verification = await verifyRegistrationResponse({
       response: credential,
@@ -2387,10 +2851,7 @@ app.post('/webauthn/register/complete', requireRole(), async (req, res) => {
 
     const { credentialPublicKey, credentialID, counter } = verification.registrationInfo;
 
-    await pool.query(
-      'DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE $2',
-      [userId, 'challenge:%']
-    );
+    await consumeWebauthnChallenge(userId, 'registration');
 
     const storedCredentialId = Buffer.from(credentialID).toString('base64');
     const storedPublicKey = Buffer.from(credentialPublicKey).toString('base64');
@@ -2435,7 +2896,7 @@ app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 
 
     const userId = userResult.rows[0].id;
     const credentials = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true',
+      "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [userId]
     );
 
@@ -2452,10 +2913,7 @@ app.post('/webauthn/authenticate/begin', createUserRateLimiter('webauthn_auth', 
       userVerification: 'preferred',
     });
 
-    await pool.query(
-      'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, device_name, device_type) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (credential_id) DO NOTHING',
-      [userId, `challenge:${options.challenge}`, options.challenge, 'pending', 'pending']
-    );
+    await storeWebauthnChallenge(userId, options.challenge, 'authentication');
 
     res.json({
       status: 'ok',
@@ -2479,7 +2937,7 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
     const credId = base64urlToBase64(credential.id);
 
     const credResult = await pool.query(
-      'SELECT * FROM webauthn_credentials WHERE credential_id = $1 AND is_active = true',
+      "SELECT * FROM webauthn_credentials WHERE credential_id = $1 AND is_active = true AND credential_id NOT LIKE 'challenge:%'",
       [credId]
     );
 
@@ -2489,16 +2947,11 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
 
     const cred = credResult.rows[0];
 
-    const challengeResult = await pool.query(
-      "SELECT public_key FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%' AND device_name = 'pending'",
-      [cred.user_id]
-    );
+    const expectedChallenge = await getLatestWebauthnChallenge(cred.user_id, 'authentication');
 
-    if (!challengeResult.rows[0]) {
+    if (!expectedChallenge) {
       return res.status(400).json({ message: 'No pending authentication challenge. Please start authentication again.' });
     }
-
-    const expectedChallenge = challengeResult.rows[0].public_key;
 
     const verification = await verifyAuthenticationResponse({
       response: credential,
@@ -2522,10 +2975,7 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
       [verification.authenticationInfo.newCounter, cred.id]
     );
 
-    await pool.query(
-      "DELETE FROM webauthn_credentials WHERE user_id = $1 AND credential_id LIKE 'challenge:%'",
-      [cred.user_id]
-    );
+    await consumeWebauthnChallenge(cred.user_id, 'authentication');
 
     const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [cred.user_id]);
     const user = userResult.rows[0];
@@ -2534,16 +2984,17 @@ app.post('/webauthn/authenticate/complete', createUserRateLimiter('webauthn_auth
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
-    const token = signAccessToken(user);
-    await createRefreshToken(user.id);
+    const { sessionId, accessToken: token } = await issueLoginSession(user, req, res);
 
     await sendAuditEvent('auth.webauthn_login', user.id, user.email, {
       credential_id: credId.substring(0, 20) + '...',
+      session_id: sessionId,
     });
 
     res.json({
       message: 'Hardware security key authentication successful',
       token,
+      session_id: sessionId,
       user: sanitizeUser(user),
     });
   } catch (err) {
@@ -2556,7 +3007,7 @@ app.get('/webauthn/credentials', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'SELECT id, credential_id, device_name, device_type, counter, is_active, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at DESC',
+      "SELECT id, credential_id, device_name, device_type, counter, is_active, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 AND credential_id NOT LIKE 'challenge:%' ORDER BY created_at DESC",
       [userId]
     );
     res.json(result.rows.map(r => ({
@@ -2573,7 +3024,7 @@ app.delete('/webauthn/credentials/:id', requireRole(), async (req, res) => {
   try {
     const userId = req.user.id;
     const result = await pool.query(
-      'DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 AND is_active = true RETURNING id',
+      "DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 AND is_active = true AND credential_id NOT LIKE 'challenge:%' RETURNING id",
       [parseInt(req.params.id), userId]
     );
     if (!result.rows[0]) {
@@ -2873,14 +3324,14 @@ app.post('/oauth/callback/:provider', createUserRateLimiter('oauth_callback', 20
          tokenResponse.data.expires_in ? new Date(Date.now() + tokenResponse.data.expires_in * 1000) : null]
       );
 
-      const token = signAccessToken(userData);
-      const refreshToken = await createRefreshToken(userData.id);
+      const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
-      await sendAuditEvent('auth.oauth_login', userData.id, email, { provider });
+      await sendAuditEvent('auth.oauth_login', userData.id, email, { provider, session_id: sessionId });
 
       res.json({
         message: `OAuth ${provider} login successful`,
         token,
+        session_id: sessionId,
         user: sanitizeUser(userData),
         provider,
       });
@@ -2936,8 +3387,28 @@ app.get('/metrics', async (req, res) => {
   res.end(await promClient.register.metrics());
 });
 
-app.listen(PORT, () => {
-  console.log(`Auth service running on port ${PORT}`);
-});
+module.exports = {
+  app,
+  requireRole,
+  requireScimAuth,
+  pool,
+  parseScimApiKeys,
+  resolveScimTenant,
+  isAllowedScimRole,
+  SCIM_TENANT_KEYS,
+  storeWebauthnChallenge,
+  getLatestWebauthnChallenge,
+  consumeWebauthnChallenge,
+  WEBAUTHN_CHALLENGE_TTL_MINUTES,
+  normalizeEmail,
+  validateEmail,
+  validatePassword,
+  hashToken,
+  sanitizeUser,
+};
 
-module.exports = { app, requireRole, pool };
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Auth service running on port ${PORT}`);
+  });
+}
