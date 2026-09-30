@@ -12,12 +12,29 @@ from uuid import UUID
 
 import httpx
 
+try:
+    from prometheus_client import Counter as _PromCounter
+except Exception:
+    _PromCounter = None
 from ssrf_guard import MAX_RESPONSE_BODY_CHARS, SSRFBlockedError, validate_webhook_headers, validate_webhook_url
 
 logger = logging.getLogger("webhook-engine")
 
-INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "svc-integration-key-change-in-production")
+INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "")
 AUDIT_SERVICE_URL = os.environ.get("AUDIT_SERVICE_URL", "http://audit-compliance-service:8011")
+AUDIT_WRITER_AUDIENCE = "audit-writer"
+
+if _PromCounter is not None:
+    try:
+        AUDIT_DELIVERY_FAILURES = _PromCounter(
+            "atlas_audit_delivery_failures_total",
+            "Total audit log delivery failures from integration-service",
+            ["event_type"],
+        )
+    except Exception:
+        AUDIT_DELIVERY_FAILURES = None
+else:
+    AUDIT_DELIVERY_FAILURES = None
 
 # httpx.AsyncClient pools hold primitives bound to the loop that first used
 # them, so one global client cannot be shared across the per-delivery loops
@@ -45,6 +62,34 @@ def get_client() -> httpx.AsyncClient:
 
 def compute_signature(payload: bytes, secret: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
+def _base64url_no_pad(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def mint_audit_writer_token() -> str:
+    if not INTERNAL_JWT_SECRET:
+        raise RuntimeError("INTERNAL_JWT_SECRET is required to send audit events")
+    header_b64 = _base64url_no_pad(json.dumps({"alg": "HS256"}).encode())
+    payload_b64 = _base64url_no_pad(
+        json.dumps(
+            {
+                "sub": "integration-service",
+                "service": "integration-service",
+                "tenant_id": "default",
+                "aud": AUDIT_WRITER_AUDIENCE,
+                "exp": int(time.time()) + 60,
+            }
+        ).encode()
+    )
+    signing_input = f"{header_b64}.{payload_b64}"
+    signature = _base64url_no_pad(
+        hmac.new(INTERNAL_JWT_SECRET.encode(), signing_input.encode(), hashlib.sha256).digest()
+    )
+    return f"{signing_input}.{signature}"
 
 
 async def deliver_webhook(
@@ -96,22 +141,38 @@ async def deliver_webhook(
 
 async def send_audit_event(event_type: str, details: dict):
     try:
-        client = get_client()
-        await client.post(
-            f"{AUDIT_SERVICE_URL}/api/v1/audit/log",
-            json={
-                "event_type": event_type,
-                "user_id": "system",
-                "email": "system@integration-service",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "details": details,
-                "service": "integration-service",
-            },
-            headers={"X-Internal-Key": INTERNAL_API_KEY},
-            timeout=3.0,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to send audit event: {e}")
+        token = mint_audit_writer_token()
+    except RuntimeError as e:
+        logger.warning(f"Skipping audit event, service not configured: {e}")
+        return
+    delays = [0, 0.3]
+    for attempt, delay in enumerate(delays):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            client = get_client()
+            await client.post(
+                f"{AUDIT_SERVICE_URL}/api/v1/audit/log",
+                json={
+                    "event_type": event_type,
+                    "user_id": "system",
+                    "email": "system@integration-service",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "details": details,
+                    "service": "integration-service",
+                },
+                headers={"x-internal-auth": token},
+                timeout=3.0,
+            )
+            return
+        except Exception as e:
+            if attempt == len(delays) - 1:
+                if AUDIT_DELIVERY_FAILURES is not None:
+                    try:
+                        AUDIT_DELIVERY_FAILURES.labels(event_type=event_type).inc()
+                    except Exception:
+                        pass
+                logger.warning(f"Failed to send audit event: {e}")
 
 
 async def close_client():

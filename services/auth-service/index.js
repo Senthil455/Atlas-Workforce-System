@@ -42,6 +42,11 @@ const httpRequestsInProgress = new promClient.Gauge({
   labelNames: ['method', 'path'],
 });
 
+const auditDeliveryFailuresTotal = new promClient.Counter({
+  name: 'atlas_audit_delivery_failures_total',
+  help: 'Total audit log delivery failures from auth-service',
+  labelNames: ['event_type'],
+});
 const authFailedLoginTotal = new promClient.Counter({
   name: 'atlas_auth_failed_login_total',
   help: 'Total failed login attempts',
@@ -99,7 +104,8 @@ const REFRESH_EXPIRY_DAYS = 7;
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 const AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || 'http://audit-compliance-service:8011';
-const AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY;
+const INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET;
+const AUDIT_WRITER_AUDIENCE = 'audit-writer';
 const SAML_IDP_SSO_URL = process.env.SAML_IDP_SSO_URL || 'https://idp.example.com/sso';
 const SAML_IDP_ENTITY_ID = process.env.SAML_IDP_ENTITY_ID || 'https://idp.example.com/metadata';
 const SAML_IDP_CERT = (process.env.SAML_IDP_CERT || '').replace(/\\n/g, '\n');
@@ -188,8 +194,8 @@ if (!ADMIN_DEFAULT_PASSWORD) {
   process.exit(1);
 }
 
-if (!AUDIT_INTERNAL_KEY) {
-  console.error('FATAL: AUDIT_INTERNAL_KEY environment variable is required');
+if (!INTERNAL_JWT_SECRET) {
+  console.error('FATAL: INTERNAL_JWT_SECRET environment variable is required');
   process.exit(1);
 }
 
@@ -669,6 +675,18 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+function mintAuditWriterToken() {
+  return jwt.sign(
+    {
+      sub: 'auth-service',
+      service: 'auth-service',
+      tenant_id: 'default',
+      aud: AUDIT_WRITER_AUDIENCE,
+    },
+    INTERNAL_JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '60s' }
+  );
+}
 setInterval(async () => {
   try {
     await pool.query("DELETE FROM failed_attempts WHERE locked_until IS NULL AND updated_at < NOW() - INTERVAL '1 hour'");
@@ -679,20 +697,29 @@ setInterval(async () => {
 }, 10 * 60 * 1000);
 
 async function sendAuditEvent(eventType, userId, email, details = {}) {
-  try {
-    await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, {
-      event_type: eventType,
-      user_id: userId,
-      email,
-      timestamp: new Date().toISOString(),
-      details,
-      service: 'auth-service'
-    }, {
-      headers: { 'X-Internal-Key': AUDIT_INTERNAL_KEY },
-      timeout: 3000
-    });
-  } catch (err) {
-    console.error(`Audit log failed for ${eventType}:`, err.message);
+  const payload = {
+    event_type: eventType,
+    user_id: userId,
+    email,
+    timestamp: new Date().toISOString(),
+    details,
+    service: 'auth-service'
+  };
+  const delaysMs = [0, 300];
+  for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    if (delaysMs[attempt]) await new Promise((r) => setTimeout(r, delaysMs[attempt]));
+    try {
+      await axios.post(`${AUDIT_SERVICE_URL}/api/v1/audit/log`, payload, {
+        headers: { 'x-internal-auth': mintAuditWriterToken() },
+        timeout: 3000
+      });
+      return;
+    } catch (err) {
+      if (attempt === delaysMs.length - 1) {
+        try { auditDeliveryFailuresTotal.labels({ event_type: eventType }).inc(); } catch {}
+        console.error(`Audit log failed for ${eventType}:`, err.message);
+      }
+    }
   }
 }
 

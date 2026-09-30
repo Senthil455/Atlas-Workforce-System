@@ -6,7 +6,7 @@ from typing import Optional
 from uuid import UUID
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response, JSONResponse
 from sqlalchemy import create_engine
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from atlas_observability import (
     AtlasLoggingMiddleware, AtlasMetricsMiddleware, CorrelationIdMiddleware,
     SecurityHeadersMiddleware,
-    configure_logging, get_logger, verify_internal_auth
+    configure_logging, get_logger, verify_internal_auth, AUDIT_WRITER_AUDIENCE
 )
 
 from crud import (
@@ -45,7 +45,6 @@ from crud import (
 )
 from models import AuditLog, Base
 from schemas import (
-    AuditLogCreate,
     AuditLogPaginated,
     AuditLogResponse,
     CompliancePolicyCreate,
@@ -71,9 +70,6 @@ load_dotenv()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://atlas:atlas_pass@localhost:5432/atlas_audit"
-)
-INTERNAL_API_KEY = os.getenv(
-    "INTERNAL_API_KEY", "svc-audit-compliance-secret-key-change-in-production"
 )
 HASH_SALT = os.getenv(
     "HASH_SALT", "a8f3b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
@@ -172,6 +168,7 @@ async def internal_auth_middleware(request: Request, call_next):
         request.state.tenant_id = verified_tenant
         request.state.user_id = claims.get("user_id", "")
         request.state.user_role = claims.get("user_role", "employee")
+        request.state.claims = claims
         # Reject an explicitly empty tenant header or query value. An empty
         # string is falsy in Python, so without this check it would silently
         # disable the tenant filter downstream.
@@ -223,10 +220,58 @@ async def internal_auth_middleware(request: Request, call_next):
 
 
 
-async def verify_internal_key(x_internal_key: str = Header(...)):
-    if x_internal_key != INTERNAL_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid internal API key")
+async def require_audit_writer(request: Request):
+    claims = getattr(request.state, "claims", None) or {}
+    aud = claims.get("aud")
+    if isinstance(aud, list):
+        ok = AUDIT_WRITER_AUDIENCE in aud
+    else:
+        ok = aud == AUDIT_WRITER_AUDIENCE
+    if not ok:
+        raise HTTPException(status_code=403, detail="Audit writer audience required")
     return True
+
+
+def normalize_audit_payload(payload: dict, claims: dict) -> dict:
+    # Accept both the canonical audit shape and the compact service shape
+    # ({event_type, user_id, email, details, service}) that the Node and
+    # Python writers send, so authenticated writes are not lost to 422s.
+    # Missing tenant/actor fall back to the verified JWT claims.
+    if not isinstance(payload, dict) or not payload.get("event_type"):
+        raise HTTPException(status_code=422, detail="event_type is required")
+    claims = claims or {}
+    details = payload.get("details")
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if isinstance(details, dict):
+        metadata = {**details, **metadata}
+    elif details is not None:
+        metadata = {**metadata, "details": details}
+    for extra in ("service", "path", "method", "user_email", "user_role",
+                  "status_code", "correlation_id", "device_id"):
+        if extra in payload and extra not in metadata:
+            metadata[extra] = payload[extra]
+    return {
+        "tenant_id": payload.get("tenant_id") or claims.get("tenant_id", "default"),
+        "event_type": payload.get("event_type"),
+        "actor_id": str(
+            payload.get("actor_id")
+            or payload.get("user_id")
+            or payload.get("user_email")
+            or payload.get("email")
+            or "system"
+        ),
+        "actor_email": payload.get("actor_email") or payload.get("email"),
+        "action": payload.get("action"),
+        "resource_type": payload.get("resource_type"),
+        "resource_id": payload.get("resource_id"),
+        "old_value": payload.get("old_value"),
+        "new_value": payload.get("new_value"),
+        "ip_address": payload.get("ip_address"),
+        "user_agent": payload.get("user_agent"),
+        "session_id": payload.get("session_id"),
+        "device_fingerprint": payload.get("device_fingerprint"),
+        "metadata": metadata,
+    }
 
 
 async def clamp_page_size(page_size: int = Query(50, ge=1, le=MAX_PAGE_SIZE)) -> int:
@@ -274,13 +319,13 @@ async def health_check():
     tags=["Audit Logs"],
     summary="Create audit log entry",
     description="Creates an immutable audit log entry with hash chain integrity. "
-    "Requires X-Internal-Key header for service-to-service authentication.",
+    "Requires x-internal-auth JWT with the audit-writer audience.",
 )
 async def create_audit_entry(
     payload: AuditLogCreate,
     request: Request,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_internal_key),
+    _: bool = Depends(require_audit_writer),
 ):
     check_body_tenant(request, payload.tenant_id)
     try:
