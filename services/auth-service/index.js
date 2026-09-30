@@ -3278,8 +3278,28 @@ app.get('/metrics', async (req, res) => {
   res.end(await promClient.register.metrics());
 });
 
-app.listen(PORT, () => {
-  console.log(`Auth service running on port ${PORT}`);
-});
+module.exports = {
+  app,
+  requireRole,
+  requireScimAuth,
+  pool,
+  parseScimApiKeys,
+  resolveScimTenant,
+  isAllowedScimRole,
+  SCIM_TENANT_KEYS,
+  storeWebauthnChallenge,
+  getLatestWebauthnChallenge,
+  consumeWebauthnChallenge,
+  WEBAUTHN_CHALLENGE_TTL_MINUTES,
+  normalizeEmail,
+  validateEmail,
+  validatePassword,
+  hashToken,
+  sanitizeUser,
+};
 
-module.exports = { app, requireRole, requireScimAuth, pool, parseScimApiKeys, resolveScimTenant, isAllowedScimRole, SCIM_TENANT_KEYS, storeWebauthnChallenge, getLatestWebauthnChallenge, consumeWebauthnChallenge, WEBAUTHN_CHALLENGE_TTL_MINUTES, normalizeEmail, validateEmail };
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Auth service running on port ${PORT}`);
+  });
+}
