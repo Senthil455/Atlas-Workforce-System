@@ -4,6 +4,7 @@ import com.ems.payroll.model.EnhancedPayrollRecord;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
+import java.math.BigDecimal;
 import java.util.List;
 
 @Repository
@@ -16,14 +17,14 @@ public interface EnhancedPayrollRepository extends JpaRepository<EnhancedPayroll
     List<EnhancedPayrollRecord> findByTenantIdAndStatus(String tenantId, String status);
 
     @Query("SELECT COALESCE(SUM(e.baseSalary), 0) FROM EnhancedPayrollRecord e WHERE e.tenantId = ?1 AND e.period = ?2")
-    Double sumBaseSalaryByTenantAndPeriod(String tenantId, String period);
+    BigDecimal sumBaseSalaryByTenantAndPeriod(String tenantId, String period);
 
     @Query("SELECT COALESCE(SUM(e.tax), 0) FROM EnhancedPayrollRecord e WHERE e.tenantId = ?1 AND e.period = ?2")
-    Double sumTaxByTenantAndPeriod(String tenantId, String period);
+    BigDecimal sumTaxByTenantAndPeriod(String tenantId, String period);
 
     @Query("SELECT COALESCE(SUM(e.netSalary), 0) FROM EnhancedPayrollRecord e WHERE e.tenantId = ?1 AND e.period = ?2")
-    Double sumNetSalaryByTenantAndPeriod(String tenantId, String period);
+    BigDecimal sumNetSalaryByTenantAndPeriod(String tenantId, String period);
 
     @Query("SELECT COALESCE(SUM(e.grossSalary), 0) FROM EnhancedPayrollRecord e WHERE e.tenantId = ?1")
-    Double sumGrossSalaryByTenant(String tenantId);
+    BigDecimal sumGrossSalaryByTenant(String tenantId);
 }

@@ -58,6 +58,12 @@ def _get_latest_hash_for_tenant(db: Session, tenant_id: str) -> Optional[str]:
     return entry[0] if entry else None
 
 
+def _require_tenant(tenant_id) -> str:
+    if not tenant_id or not str(tenant_id).strip():
+        raise ValueError("tenant_id is required")
+    return str(tenant_id).strip()
+
+
 def _paginate_query(query, page: int, page_size: int):
     total = query.count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
@@ -79,9 +85,46 @@ def _build_date_filter(model_field, start_date: Optional[datetime], end_date: Op
     return clauses
 
 
+def require_fields(data: dict, fields: list) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("Request body must be a JSON object")
+    missing = [f for f in fields if data.get(f) in (None, "")]
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+
+def resolve_tenant(data: dict, context_tenant: Optional[str] = None) -> str:
+    body_tenant = data.get("tenant_id") if isinstance(data, dict) else None
+    if context_tenant:
+        if body_tenant and body_tenant != context_tenant:
+            raise ValueError("Tenant mismatch between context and body")
+        return context_tenant
+    if not body_tenant:
+        raise ValueError("Missing required fields: tenant_id")
+    return body_tenant
+
+
+class MassAssignmentError(ValueError):
+    pass
+
+
+def apply_updates(obj, data: dict[str, Any], allowed_fields: set):
+    unknown = [k for k in data.keys() if k not in allowed_fields]
+    if unknown:
+        raise MassAssignmentError(f"Unknown or read-only fields: {', '.join(sorted(unknown))}")
+    for key in allowed_fields:
+        if key in data and data[key] is not None:
+            setattr(obj, key, data[key])
+    return obj
+
+
+COMPLIANCE_POLICY_UPDATE_FIELDS = frozenset({"name", "description", "category", "severity", "rules", "enabled"})
+
+
 # ── Audit Logs ──────────────────────────────────────────────────────────────
 
 def create_audit_log(db: Session, data: dict[str, Any], salt: str) -> AuditLog:
+    require_fields(data, ["tenant_id", "event_type", "actor_id"])
     previous_hash = _get_latest_hash_for_tenant(db, data["tenant_id"]) or ""
     now = datetime.now(timezone.utc)
 
@@ -126,7 +169,7 @@ def get_audit_log(db: Session, log_id: UUID) -> Optional[AuditLog]:
 
 def list_audit_logs(
     db: Session,
-    tenant_id: Optional[str] = None,
+    tenant_id: str,
     event_type: Optional[str] = None,
     actor_id: Optional[str] = None,
     resource_type: Optional[str] = None,
@@ -136,11 +179,10 @@ def list_audit_logs(
     page: int = 1,
     page_size: int = 50,
 ):
+    tenant_id = _require_tenant(tenant_id)
     q = db.query(AuditLog)
 
-    filters = []
-    if tenant_id:
-        filters.append(AuditLog.tenant_id == tenant_id)
+    filters = [AuditLog.tenant_id == tenant_id]
     if event_type:
         filters.append(AuditLog.event_type == event_type)
     if actor_id:
@@ -162,17 +204,16 @@ def list_audit_logs(
 
 def export_audit_logs_csv(
     db: Session,
-    tenant_id: Optional[str] = None,
+    tenant_id: str,
     event_type: Optional[str] = None,
     actor_id: Optional[str] = None,
     resource_type: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> str:
+    tenant_id = _require_tenant(tenant_id)
     q = db.query(AuditLog)
-    filters = []
-    if tenant_id:
-        filters.append(AuditLog.tenant_id == tenant_id)
+    filters = [AuditLog.tenant_id == tenant_id]
     if event_type:
         filters.append(AuditLog.event_type == event_type)
     if actor_id:
@@ -207,17 +248,16 @@ def export_audit_logs_csv(
 
 def export_audit_logs_json(
     db: Session,
-    tenant_id: Optional[str] = None,
+    tenant_id: str,
     event_type: Optional[str] = None,
     actor_id: Optional[str] = None,
     resource_type: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> str:
+    tenant_id = _require_tenant(tenant_id)
     q = db.query(AuditLog)
-    filters = []
-    if tenant_id:
-        filters.append(AuditLog.tenant_id == tenant_id)
+    filters = [AuditLog.tenant_id == tenant_id]
     if event_type:
         filters.append(AuditLog.event_type == event_type)
     if actor_id:
@@ -257,16 +297,15 @@ def export_audit_logs_json(
 
 def list_policies(
     db: Session,
-    tenant_id: Optional[str] = None,
+    tenant_id: str,
     category: Optional[str] = None,
     enabled: Optional[bool] = None,
     page: int = 1,
     page_size: int = 50,
 ):
+    tenant_id = _require_tenant(tenant_id)
     q = db.query(CompliancePolicy)
-    filters = []
-    if tenant_id:
-        filters.append(CompliancePolicy.tenant_id == tenant_id)
+    filters = [CompliancePolicy.tenant_id == tenant_id]
     if category:
         filters.append(CompliancePolicy.category == category)
     if enabled is not None:
@@ -282,6 +321,7 @@ def get_policy(db: Session, policy_id: UUID) -> Optional[CompliancePolicy]:
 
 
 def create_policy(db: Session, data: dict[str, Any]) -> CompliancePolicy:
+    require_fields(data, ["tenant_id", "name"])
     policy = CompliancePolicy(
         tenant_id=data["tenant_id"],
         name=data["name"],
@@ -301,9 +341,7 @@ def update_policy(db: Session, policy_id: UUID, data: dict[str, Any]) -> Optiona
     policy = get_policy(db, policy_id)
     if not policy:
         return None
-    for key, value in data.items():
-        if value is not None and hasattr(policy, key):
-            setattr(policy, key, value)
+    apply_updates(policy, data, COMPLIANCE_POLICY_UPDATE_FIELDS)
     policy.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(policy)
@@ -323,7 +361,7 @@ def delete_policy(db: Session, policy_id: UUID) -> bool:
 
 def list_violations(
     db: Session,
-    tenant_id: Optional[str] = None,
+    tenant_id: str,
     policy_id: Optional[UUID] = None,
     employee_id: Optional[str] = None,
     severity: Optional[str] = None,
@@ -333,10 +371,9 @@ def list_violations(
     page: int = 1,
     page_size: int = 50,
 ):
+    tenant_id = _require_tenant(tenant_id)
     q = db.query(ComplianceViolation)
-    filters = []
-    if tenant_id:
-        filters.append(ComplianceViolation.tenant_id == tenant_id)
+    filters = [ComplianceViolation.tenant_id == tenant_id]
     if policy_id:
         filters.append(ComplianceViolation.policy_id == policy_id)
     if employee_id:
@@ -354,6 +391,7 @@ def list_violations(
 
 
 def create_violation(db: Session, data: dict[str, Any]) -> ComplianceViolation:
+    require_fields(data, ["tenant_id", "description"])
     violation = ComplianceViolation(
         tenant_id=data["tenant_id"],
         policy_id=data.get("policy_id"),
@@ -660,14 +698,14 @@ def generate_compliance_report(
 
 # ── Data Retention Policies ─────────────────────────────────────────────────
 
-def list_retention_policies(db: Session, tenant_id: Optional[str] = None):
-    q = db.query(DataRetentionPolicy)
-    if tenant_id:
-        q = q.filter(DataRetentionPolicy.tenant_id == tenant_id)
+def list_retention_policies(db: Session, tenant_id: str):
+    tenant_id = _require_tenant(tenant_id)
+    q = db.query(DataRetentionPolicy).filter(DataRetentionPolicy.tenant_id == tenant_id)
     return q.all()
 
 
 def create_retention_policy(db: Session, data: dict[str, Any]) -> DataRetentionPolicy:
+    require_fields(data, ["resource_type", "retention_days"])
     policy = DataRetentionPolicy(
         tenant_id=data.get("tenant_id"),
         resource_type=data["resource_type"],
@@ -684,17 +722,20 @@ def create_retention_policy(db: Session, data: dict[str, Any]) -> DataRetentionP
 # ── GDPR ────────────────────────────────────────────────────────────────────
 
 def get_consents(
-    db: Session, employee_id: str, tenant_id: Optional[str] = None
+    db: Session, employee_id: str, tenant_id: str
 ) -> list[GDPRConsentRecord]:
+    tenant_id = _require_tenant(tenant_id)
     q = db.query(GDPRConsentRecord).filter(
         GDPRConsentRecord.employee_id == employee_id
     )
-    if tenant_id:
-        q = q.filter(GDPRConsentRecord.tenant_id == tenant_id)
+    q = q.filter(GDPRConsentRecord.tenant_id == tenant_id)
     return q.order_by(GDPRConsentRecord.granted_at.desc()).all()
 
 
 def record_consent(db: Session, data: dict[str, Any]) -> GDPRConsentRecord:
+    require_fields(data, ["employee_id", "consent_type"])
+    if data.get("granted") is None:
+        raise ValueError("Missing required fields: granted")
     if data.get("granted"):
         revoked_at = None
     else:
@@ -715,11 +756,11 @@ def record_consent(db: Session, data: dict[str, Any]) -> GDPRConsentRecord:
 
 
 def right_to_be_forgotten(
-    db: Session, employee_id: str, tenant_id: Optional[str] = None
+    db: Session, employee_id: str, tenant_id: str
 ) -> dict:
+    tenant_id = _require_tenant(tenant_id)
     base_filters = [GDPRConsentRecord.employee_id == employee_id]
-    if tenant_id:
-        base_filters.append(GDPRConsentRecord.tenant_id == tenant_id)
+    base_filters.append(GDPRConsentRecord.tenant_id == tenant_id)
 
     consent_records = (
         db.query(GDPRConsentRecord)
@@ -731,8 +772,7 @@ def right_to_be_forgotten(
         db.delete(record)
 
     audit_filters = [AuditLog.actor_id == employee_id]
-    if tenant_id:
-        audit_filters.append(AuditLog.tenant_id == tenant_id)
+    audit_filters.append(AuditLog.tenant_id == tenant_id)
 
     audit_logs = (
         db.query(AuditLog)
@@ -755,13 +795,13 @@ def right_to_be_forgotten(
 
 
 def data_portability(
-    db: Session, employee_id: str, tenant_id: Optional[str] = None
+    db: Session, employee_id: str, tenant_id: str
 ) -> dict:
+    tenant_id = _require_tenant(tenant_id)
     consents = get_consents(db, employee_id, tenant_id)
 
     v_filters = [ComplianceViolation.employee_id == employee_id]
-    if tenant_id:
-        v_filters.append(ComplianceViolation.tenant_id == tenant_id)
+    v_filters.append(ComplianceViolation.tenant_id == tenant_id)
     violations = (
         db.query(ComplianceViolation)
         .filter(and_(*v_filters))
@@ -769,8 +809,7 @@ def data_portability(
     )
 
     a_filters = [AuditLog.actor_id == employee_id]
-    if tenant_id:
-        a_filters.append(AuditLog.tenant_id == tenant_id)
+    a_filters.append(AuditLog.tenant_id == tenant_id)
 
     from schemas import AuditLogResponse, ComplianceViolationResponse, GDPRConsentResponse
 

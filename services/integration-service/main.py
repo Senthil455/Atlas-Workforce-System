@@ -18,6 +18,7 @@ from atlas_observability import (
 )
 
 from crud import (
+    MassAssignmentError,
     create_event_subscription,
     create_integration_config,
     create_webhook,
@@ -69,7 +70,6 @@ configure_logging("integration-service", level=logging.INFO)
 logger = get_logger("integration-service")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://atlas_user:atlas_password@postgres:5432/atlas_db")
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "svc-integration-key-change-in-production")
 INTERNAL_JWT_SECRET = os.environ.get("INTERNAL_JWT_SECRET", "")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000")
 MAX_PAGE_SIZE = 100
@@ -87,16 +87,47 @@ def get_db() -> Session:
         db.close()
 
 
+def _migrate_delivery_retry_constraint():
+    # Backfill pre-fix PENDING rows left with NULL next_retry_at, then add the
+    # CHECK constraint on Postgres deployments that predate it. Fresh databases
+    # get the constraint from create_all. Best effort: never block startup.
+    try:
+        from sqlalchemy import text
 
-async def verify_internal_key(x_internal_key: str = Header(...)):
-    if x_internal_key != INTERNAL_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid internal API key")
-    return True
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(text(
+                    "UPDATE integration_webhook_delivery_logs "
+                    "SET next_retry_at = NOW() "
+                    "WHERE status = 'PENDING' AND next_retry_at IS NULL"
+                ))
+                conn.execute(text(
+                    "DO $$ BEGIN "
+                    "IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+                    "WHERE conname = 'ck_delivery_pending_has_retry') THEN "
+                    "ALTER TABLE integration_webhook_delivery_logs ADD CONSTRAINT "
+                    "ck_delivery_pending_has_retry CHECK (status <> 'PENDING' OR next_retry_at IS NOT NULL); "
+                    "END IF; END $$;"
+                ))
+            else:
+                conn.execute(text(
+                    "UPDATE integration_webhook_delivery_logs "
+                    "SET next_retry_at = CURRENT_TIMESTAMP "
+                    "WHERE status = 'PENDING' AND next_retry_at IS NULL"
+                ))
+    except Exception as e:
+        logger.warning(f"Delivery retry constraint migration skipped: {e}")
+
+
+
+# verify_internal_key removed - all endpoints now require x-internal-auth JWT
+# (same as employee-python-service); tenant is bound from verified claims.
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    _migrate_delivery_retry_constraint()
     start_rabbitmq_consumer()
 
     def _background_loop():
@@ -112,6 +143,12 @@ async def lifespan(app: FastAPI):
     bg_thread.start()
 
     yield
+
+    try:
+        from webhook_engine import close_all_clients
+        await close_all_clients()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -237,7 +274,10 @@ async def create_integration_webhook(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    return create_webhook(db, x_tenant_id, payload.model_dump())
+    try:
+        return create_webhook(db, x_tenant_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/v1/integration/webhooks/{webhook_id}", response_model=WebhookResponse, tags=["Webhooks"])
@@ -259,7 +299,10 @@ async def update_integration_webhook(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    wh = update_webhook(db, webhook_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    try:
+        wh = update_webhook(db, webhook_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook not found")
     return wh
@@ -309,7 +352,10 @@ async def create_integration_subscription(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    return create_event_subscription(db, x_tenant_id, payload.model_dump())
+    try:
+        return create_event_subscription(db, x_tenant_id, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/v1/integration/subscriptions/{sub_id}", response_model=EventSubscriptionResponse, tags=["Event Subscriptions"])
@@ -331,7 +377,10 @@ async def update_integration_subscription(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    sub = update_event_subscription(db, sub_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    try:
+        sub = update_event_subscription(db, sub_id, x_tenant_id, payload.model_dump(exclude_unset=True))
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
     return sub
@@ -367,7 +416,6 @@ async def list_integration_outbox(
 async def publish_internal_event(
     payload: EventPublishRequest,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_internal_key),
 ):
     route_event(payload.event_type, payload.tenant_id, payload.payload, payload.source_service)
     return {"message": "Event accepted for routing", "event_type": payload.event_type, "tenant_id": payload.tenant_id}
@@ -391,6 +439,8 @@ async def create_integration_config_endpoint(
 ):
     try:
         return create_integration_config(db, x_tenant_id, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if "unique" in str(e).lower():
             raise HTTPException(status_code=409, detail="Config key already exists")
@@ -416,7 +466,10 @@ async def update_integration_config_endpoint(
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):
-    config = update_integration_config(db, x_tenant_id, key, payload.model_dump())
+    try:
+        config = update_integration_config(db, x_tenant_id, key, payload.model_dump())
+    except MassAssignmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not config:
         raise HTTPException(status_code=404, detail="Config not found")
     return config

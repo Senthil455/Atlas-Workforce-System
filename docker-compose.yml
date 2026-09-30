@@ -2,7 +2,7 @@
 # Before deploying to production, set ALL of the following environment variables:
 #   JWT_SECRET, INTERNAL_JWT_SECRET, POSTGRES_PASSWORD, MONGO_PASSWORD,
 #   MONGO_USER, REDIS_PASSWORD, RABBITMQ_USER, RABBITMQ_PASS,
-#   ADMIN_DEFAULT_PASSWORD, AUDIT_INTERNAL_KEY, SCIM_API_KEY, SECURITY_INTERNAL_KEY,
+#   ADMIN_DEFAULT_PASSWORD, SCIM_API_KEY, SECURITY_INTERNAL_KEY,
 #   OAUTH_ENCRYPTION_KEY,
 #   MFA_STEPUP_SECRET.
 # Generate strong secrets: openssl rand -base64 64
@@ -128,9 +128,13 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-atlas_rabbit}:${RABBITMQ_PASS:-changeme_rabbit_pass}@rabbitmq:5672/
-      - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
+      - AUDIT_SERVICE_URL=http://audit-compliance-service:8011
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - WEBHOOK_ALLOW_HTTP=${WEBHOOK_ALLOW_HTTP:-false}
+      - WEBHOOK_ALLOW_PRIVATE_IPS=${WEBHOOK_ALLOW_PRIVATE_IPS:-false}
+      - WEBHOOK_ALLOWED_HOSTS=${WEBHOOK_ALLOWED_HOSTS:-}
+      - WEBHOOK_BLOCKED_HOSTS=${WEBHOOK_BLOCKED_HOSTS:-}
     networks:
       - atlas-network
     depends_on:
@@ -171,7 +175,6 @@ services:
       - AI_SERVICE_URL=http://ai-service:8065
       - LIVE_SERVICE_URL=http://live-service:8060
       - WORKFORCE_SERVICE_URL=http://workforce-planning-service:8017
-      - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
       - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
       - SLACK_WEBHOOK_SECRET=${SLACK_WEBHOOK_SECRET:-}
     networks:
@@ -204,10 +207,13 @@ services:
       - MFA_STEPUP_SECRET=${MFA_STEPUP_SECRET:-atlas-mfa-stepup-secret-change-me}
       - ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD:-ChangeMe123!}
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme_redis_pass}@redis:6379
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
       - NODE_ENV=${NODE_ENV:-production}
-      - AUDIT_INTERNAL_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - AUDIT_SERVICE_URL=http://audit-compliance-service:8011
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
       - SCIM_API_KEY=${SCIM_API_KEY:-change-scim-api-key-in-production}
+      - SCIM_API_KEYS=${SCIM_API_KEYS:-}
       - SAML_IDP_SSO_URL=${SAML_IDP_SSO_URL:-https://idp.example.com/sso}
       - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID:-https://idp.example.com/metadata}
       - SAML_IDP_CERT=${SAML_IDP_CERT:-}
@@ -217,6 +223,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
 
   employee-service:
     build:
@@ -327,7 +335,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-atlas_user}:${POSTGRES_PASSWORD:-atlas_password}@postgres:5432/${POSTGRES_DB:-atlas_db}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
-      - INTERNAL_API_KEY=${AUDIT_INTERNAL_KEY:-atlas-internal-key-change-me}
+      - INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET:-atlas-internal-jwt-secret-change-me}
     networks:
       - atlas-network
     depends_on:

@@ -27,6 +27,39 @@ def get_correlation_id() -> str:
     return correlation_id_ctx.get()
 
 
+AUDIT_WRITER_AUDIENCE = "audit-writer"
+
+
+def mint_internal_auth(
+    jwt_secret: str,
+    service: str,
+    tenant_id: str = "default",
+    audience: str = AUDIT_WRITER_AUDIENCE,
+    ttl_seconds: int = 60,
+) -> str:
+    """Mint a service-to-service internal auth JWT.
+
+    Single implementation shared by all Python audit writers so the format
+    cannot drift from :func:`verify_internal_auth`.
+    """
+    if not jwt_secret:
+        raise ValueError("INTERNAL_JWT_SECRET is required to mint internal auth tokens")
+    header_b64 = base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode()).rstrip(b"=").decode()
+    payload = {
+        "sub": service,
+        "service": service,
+        "tenant_id": tenant_id,
+        "aud": audience,
+        "exp": int(time.time()) + ttl_seconds,
+    }
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    signing_input = f"{header_b64}.{payload_b64}"
+    signature = base64.urlsafe_b64encode(
+        hmac.new(jwt_secret.encode(), signing_input.encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    return f"{signing_input}.{signature}"
+
+
 _URL_CREDENTIALS_RE = re.compile(r"://([^:]+):([^@]+)@")
 
 

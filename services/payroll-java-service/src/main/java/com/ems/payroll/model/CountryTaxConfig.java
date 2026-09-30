@@ -1,6 +1,7 @@
 package com.ems.payroll.model;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -12,7 +13,9 @@ public class CountryTaxConfig {
     private String country;
     private String currency;
     private String taxYear;
-    private Double standardDeduction;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal standardDeduction;
+    // Rates stay as double; see Money for the money/rate boundary.
     private Double socialSecurityRate;
     private Double medicareRate;
     private Double corporateTaxRate;
@@ -32,8 +35,8 @@ public class CountryTaxConfig {
     public void setCurrency(String currency) { this.currency = currency; }
     public String getTaxYear() { return taxYear; }
     public void setTaxYear(String taxYear) { this.taxYear = taxYear; }
-    public Double getStandardDeduction() { return standardDeduction; }
-    public void setStandardDeduction(Double standardDeduction) { this.standardDeduction = standardDeduction; }
+    public BigDecimal getStandardDeduction() { return standardDeduction; }
+    public void setStandardDeduction(BigDecimal standardDeduction) { this.standardDeduction = standardDeduction; }
     public Double getSocialSecurityRate() { return socialSecurityRate; }
     public void setSocialSecurityRate(Double socialSecurityRate) { this.socialSecurityRate = socialSecurityRate; }
     public Double getMedicareRate() { return medicareRate; }

@@ -3,6 +3,7 @@ package com.ems.payroll.model;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.PositiveOrZero;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -14,7 +15,8 @@ public class Bonus {
     private String employeeId;
     private String tenantId;
     @Min(0) @PositiveOrZero
-    private Double amount;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal amount;
     private String type;
     private String reason;
     private LocalDate awardDate;
@@ -33,8 +35,8 @@ public class Bonus {
     public void setEmployeeId(String employeeId) { this.employeeId = employeeId; }
     public String getTenantId() { return tenantId; }
     public void setTenantId(String tenantId) { this.tenantId = tenantId; }
-    public Double getAmount() { return amount; }
-    public void setAmount(Double amount) { this.amount = amount; }
+    public BigDecimal getAmount() { return amount; }
+    public void setAmount(BigDecimal amount) { this.amount = amount; }
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
     public String getReason() { return reason; }

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -56,6 +56,10 @@ class WebhookDeliveryLog(Base):
     webhook = relationship("Webhook", back_populates="delivery_logs")
 
     __table_args__ = (
+        CheckConstraint(
+            "status <> 'PENDING' OR next_retry_at IS NOT NULL",
+            name="ck_delivery_pending_has_retry",
+        ),
         Index("idx_webhook_delivery_status", "status", "next_retry_at"),
         Index("idx_webhook_delivery_webhook", "webhook_id"),
         Index("idx_webhook_delivery_tenant", "tenant_id"),

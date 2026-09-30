@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -21,7 +22,8 @@ from crud import (
     update_delivery_log,
     update_webhook,
 )
-from webhook_engine import deliver_webhook, send_audit_event
+from models import Webhook, WebhookDeliveryLog
+from webhook_engine import close_client, deliver_webhook, send_audit_event
 
 logger = logging.getLogger("event-router")
 
@@ -86,6 +88,29 @@ def _handle_rabbitmq_message(ch, method, properties, body):
         logger.error(f"Error handling RabbitMQ message: {e}")
 
 
+RETRY_BACKOFF_CAP_SEC = 30 * 60
+
+
+def compute_backoff_delay(attempt: int, base_seconds: int, cap_seconds: int = RETRY_BACKOFF_CAP_SEC) -> float:
+    # Exponential backoff (base * 2^(attempt-1)) with a small jitter and a cap,
+    # so a permanently failing endpoint is not hit in a hot loop.
+    base = max(int(base_seconds or 0), 1)
+    delay = base * (2 ** max(int(attempt) - 1, 0))
+    delay = min(delay, cap_seconds)
+    return delay + random.uniform(0, base)
+
+
+def build_retry_update(attempt: int, max_attempts: int, base_interval_sec: int, now=None) -> dict:
+    now = now or datetime.now(timezone.utc)
+    if attempt < max_attempts:
+        return {
+            "status": "PENDING",
+            "attempts": attempt,
+            "next_retry_at": now + timedelta(seconds=compute_backoff_delay(attempt, base_interval_sec)),
+        }
+    return {"status": "FAILED", "attempts": attempt, "next_retry_at": None}
+
+
 def route_event(event_type: str, tenant_id: str, payload: dict, source_service: str = "rabbitmq"):
     db = get_db()
     if not db:
@@ -125,6 +150,22 @@ def route_event(event_type: str, tenant_id: str, payload: dict, source_service: 
         db.close()
 
 
+def _mark_delivery_failed(log_id, error):
+    db = get_db()
+    if not db:
+        return
+    try:
+        update_delivery_log(db, log_id, {
+            "status": "FAILED",
+            "status_code": 0,
+            "response_body": f"{type(error).__name__}: {error}"[:5000],
+        })
+    except Exception as e:
+        logger.error("Failed to record delivery failure: %s (%s)", e, type(e).__name__, exc_info=True)
+    finally:
+        db.close()
+
+
 def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers, timeout, tenant_id):
     import asyncio
     loop = asyncio.new_event_loop()
@@ -136,7 +177,19 @@ def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers,
         db = get_db()
         if db:
             try:
-                if 200 <= status_code < 300:
+                if isinstance(response_body, str) and response_body.startswith("Blocked destination:"):
+                    update_delivery_log(db, log_id, {
+                        "status": "FAILED",
+                        "status_code": status_code,
+                        "response_body": response_body,
+                    })
+                elif isinstance(response_body, str) and response_body.startswith("Blocked headers:"):
+                    update_delivery_log(db, log_id, {
+                        "status": "FAILED",
+                        "status_code": status_code,
+                        "response_body": response_body,
+                    })
+                elif 200 <= status_code < 300:
                     update_delivery_log(db, log_id, {
                         "status": "DELIVERED",
                         "status_code": status_code,
@@ -145,26 +198,25 @@ def _deliver_sync(url, payload, event_type, webhook_id, log_id, secret, headers,
                     })
                     update_webhook(db, webhook_id, tenant_id, {"last_triggered_at": datetime.now(timezone.utc)})
                 else:
-                    log_entry = db.execute(
-                        "SELECT attempts, max_attempts FROM integration_webhook_delivery_logs WHERE id = %s",
-                        (str(log_id),)
-                    ).fetchone()
-                    attempts = (log_entry[0] if log_entry else 0) + 1
-                    max_attempts = log_entry[1] if log_entry else 3
-                    retry_data = {
-                        "status": "PENDING" if attempts < max_attempts else "FAILED",
-                        "status_code": status_code,
-                        "response_body": response_body,
-                        "attempts": attempts,
-                    }
-                    if attempts < max_attempts:
-                        retry_data["next_retry_at"] = datetime.now(timezone.utc).timestamp()
+                    log_row = db.query(WebhookDeliveryLog).filter(WebhookDeliveryLog.id == log_id).first()
+                    attempts = (log_row.attempts if log_row and log_row.attempts is not None else 0) + 1
+                    max_attempts = log_row.max_attempts if log_row and log_row.max_attempts else 3
+                    webhook_row = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+                    base_interval = webhook_row.retry_interval_sec if webhook_row and webhook_row.retry_interval_sec else 60
+                    retry_data = build_retry_update(attempts, max_attempts, base_interval)
+                    retry_data["status_code"] = status_code
+                    retry_data["response_body"] = response_body
                     update_delivery_log(db, log_id, retry_data)
             finally:
                 db.close()
     except Exception as e:
-        logger.error(f"Delivery error: {e}")
+        logger.error("Delivery error: %s (%s)", e, type(e).__name__, exc_info=True)
+        _mark_delivery_failed(log_id, e)
     finally:
+        try:
+            loop.run_until_complete(close_client())
+        except Exception as e:
+            logger.warning("Failed to close webhook client: %s (%s)", e, type(e).__name__)
         loop.close()
 
 

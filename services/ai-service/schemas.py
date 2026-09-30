@@ -247,6 +247,7 @@ class MeetingSummaryResponse(BaseModel):
     action_items: list[str] = []
     decisions: list[str] = []
     follow_ups: list[str] = []
+    sample_data: bool = False
 
 class WorkflowGenerationRequest(BaseModel):
     process_name: str
@@ -259,6 +260,7 @@ class WorkflowGenerationResponse(BaseModel):
     estimated_time: str
     required_roles: list[str] = []
     automation_opportunities: list[str] = []
+    sample_data: bool = False
 
 class AutomationBuilderRequest(BaseModel):
     trigger: str
@@ -268,6 +270,9 @@ class AutomationBuilderRequest(BaseModel):
 
 class AutomationBuilderResponse(BaseModel):
     automation_script: str
+    automation_definition: dict = {}
+    requires_review: bool = True
+    invalid_conditions: list[str] = []
     integration_points: list[str] = []
     estimated_savings: str
     validation_steps: list[str] = []

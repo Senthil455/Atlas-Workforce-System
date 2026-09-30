@@ -332,7 +332,7 @@ cd Atlas-Workforce-System
 docker compose up --build
 ```
 
-This starts **18 containers**: postgres, mongodb, redis, rabbitmq + 14 application services.
+This starts **26 containers**: postgres, mongodb, redis, rabbitmq, zookeeper, kafka + 18 application services, the API gateway and the frontend.
 
 ### Run Monitoring Stack
 

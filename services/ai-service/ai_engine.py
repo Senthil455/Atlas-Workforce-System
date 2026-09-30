@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import random
+import re
 from typing import Any
 from datetime import datetime, timedelta, timezone
 
@@ -563,82 +564,184 @@ def _performance_summary(employee_id: str, period: str = "last_quarter", include
     }
 
 
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+    return [p.strip()[:300] for p in parts if p.strip()]
+
+
 def _meeting_summary(transcript: str, meeting_type: str = "", attendees: list[str] = None) -> dict:
+    sentences = _split_sentences(transcript)
+    people = [str(a).strip()[:80] for a in (attendees or []) if str(a).strip()][:20]
+    if not sentences:
+        return {
+            "summary": "No transcript content was provided, so no summary could be derived.",
+            "key_points": [],
+            "action_items": [f"{name}: No transcript available to derive action items." for name in people],
+            "decisions": [],
+            "follow_ups": [],
+            "sample_data": True,
+        }
+    key_points = sentences[:5]
+    decisions = [s for s in sentences if re.search(r"\b(decid|agree|approv|resolv|conclud)", s, re.IGNORECASE)][:5]
+    follow_ups = [s for s in sentences if re.search(r"\b(follow[\s-]?up|next step|action item|todo|deadline|by friday|by monday)\b", s, re.IGNORECASE)][:8]
+    owners = people or ["Unassigned"]
+    action_items = [f"{owners[i % len(owners)]}: {s}" for i, s in enumerate(follow_ups[:8])]
+    if not action_items:
+        action_items = [f"{name}: Review the meeting notes and confirm your follow-ups." for name in owners[:8]]
+    kind = meeting_type or "team"
     return {
-        "summary": f"The {meeting_type or 'team'} meeting covered key agenda items including project updates, resource planning, and next quarter priorities. The team discussed {random.randint(3, 7)} main topics and reached consensus on action items.",
-        "key_points": [
-            "Project milestones are on track for Q3 delivery.",
-            "Resource allocation was reviewed and adjusted for upcoming sprint.",
-            "New initiative proposal received positive feedback from stakeholders.",
-            "Budget planning for next fiscal year needs to be initiated.",
-            "Team capacity is sufficient for current workload projections.",
-        ],
-        "action_items": [
-            "Alice: Finalize project timeline by Friday",
-            "Bob: Prepare resource allocation report for next sprint",
-            "Carol: Schedule follow-up meeting with stakeholders",
-            "Team: Complete quarterly budget projections by month end",
-        ],
-        "decisions": [
-            "Approved new project initiative with revised scope.",
-            "Decided to extend sprint duration from 2 to 3 weeks.",
-            "Selected vendor for upcoming platform migration.",
-        ],
-        "follow_ups": [
-            "Schedule one-on-one meetings with team leads.",
-            "Share meeting minutes with wider team.",
-            "Set up review checkpoint for next week.",
-        ],
+        "summary": f"The {kind} meeting transcript contains {len(sentences)} points. {len(decisions)} decision(s) and {len(follow_ups)} follow-up(s) were identified from the transcript.",
+        "key_points": key_points,
+        "action_items": action_items,
+        "decisions": decisions,
+        "follow_ups": follow_ups,
+        "sample_data": False,
     }
+
+
+_WORKFLOW_PHASES = [
+    ("Initiate", "high", 2),
+    ("Execute", "medium", 5),
+    ("Review", "medium", 3),
+    ("Close", "low", 2),
+]
+
+_WORKFLOW_ROLE_BY_DEPARTMENT = {
+    "hr": "HR Manager",
+    "human resources": "HR Manager",
+    "finance": "Finance Manager",
+    "payroll": "Finance Manager",
+    "compliance": "Compliance Officer",
+    "audit": "Compliance Officer",
+    "engineering": "Department Lead",
+    "it": "Department Lead",
+}
 
 
 def _generate_workflow(process_name: str, department: str, description: str, constraints: dict = None) -> dict:
-    steps = random.randint(3, 8)
+    name = (process_name or "Unnamed process").strip()[:120]
+    dept = (department or "").strip().lower()
+    owner_role = _WORKFLOW_ROLE_BY_DEPARTMENT.get(dept, "Department Lead")
+    text = f"{description or ''} {json.dumps(constraints or {})}".lower()
+    steps = []
+    for i, (phase, potential, days) in enumerate(_WORKFLOW_PHASES):
+        role = owner_role if i in (0, len(_WORKFLOW_PHASES) - 1) else ("Compliance Officer" if "compliance" in text or "audit" in text else "Team Member")
+        steps.append({
+            "step": i + 1,
+            "name": f"{phase} {name}",
+            "role": role,
+            "estimated_time": f"{days} days",
+            "automation_potential": potential,
+        })
+    total_days = sum(days for _, _, days in _WORKFLOW_PHASES)
+    opportunities = ["Automate notification and status updates"]
+    if "approv" in text:
+        opportunities.append("Implement digital approval workflows")
+    if "document" in text or "form" in text:
+        opportunities.append("Use AI for document classification and routing")
+    if "compliance" in text or "audit" in text:
+        opportunities.append("Automate compliance checks and validations")
     return {
-        "workflow": [
-            {"step": i + 1, "name": f"{'Initiate' if i == 0 else 'Review' if i == steps - 1 else random.choice(['Process', 'Validate', 'Approve', 'Execute', 'Notify', 'Document'])} {process_name} Phase {i + 1}", "role": random.choice(["HR Manager", "Department Lead", "Employee", "System", "Compliance Officer"]), "estimated_time": f"{random.randint(1, 5)} days", "automation_potential": random.choice(["high", "medium", "low"])}
-            for i in range(steps)
-        ],
-        "estimated_time": f"{random.randint(2, 8)} weeks",
-        "required_roles": list(set(
-            random.choices(["HR Manager", "Department Lead", "Compliance Officer", "Finance Manager", "Executive Sponsor", "Team Member"], k=random.randint(3, 5))
-        )),
-        "automation_opportunities": [
-            "Automate notification and status updates",
-            "Implement digital approval workflows",
-            "Use AI for document classification and routing",
-            "Automate compliance checks and validations",
-        ],
+        "workflow": steps,
+        "estimated_time": f"{total_days} days (~{max(1, round(total_days / 5))} weeks, rough estimate)",
+        "required_roles": sorted({s["role"] for s in steps}),
+        "automation_opportunities": opportunities,
+        "sample_data": True,
     }
 
 
+_AUTOMATION_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,64}$")
+_AUTOMATION_CONDITION_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$"
+)
+_AUTOMATION_FORMAT = "atlas-automation-definition/v1"
+_AUTOMATION_MAX_ACTIONS = 10
+_AUTOMATION_MAX_TEXT = 200
+
+
+def _parse_automation_condition(raw: str) -> tuple[dict | None, str | None]:
+    """Parse one 'field operator value' condition into data. Never eval'd."""
+    match = _AUTOMATION_CONDITION_RE.match(raw or "")
+    if not match:
+        return None, raw
+    field, operator, value_text = match.groups()
+    if not _AUTOMATION_FIELD_RE.match(field):
+        return None, raw
+    try:
+        value = json.loads(value_text)
+    except Exception:
+        return None, raw
+    if isinstance(value, (dict, list)):
+        return None, raw
+    return {"field": field, "operator": operator, "value": value}, None
+
+
+def evaluate_automation_definition(definition: dict, event: dict) -> dict:
+    """Interpret an automation definition against an event.
+
+    Data-only interpreter: conditions are compared field by field, no code
+    is generated or executed. Fails closed on anything it cannot understand.
+    """
+    definition = definition or {}
+    event = event or {}
+    invalid = definition.get("invalid_conditions") or []
+    if invalid:
+        return {"triggered": False, "actions": [], "reason": "definition has invalid conditions"}
+    for cond in definition.get("conditions") or []:
+        actual = event.get(cond.get("field"))
+        operator = cond.get("operator")
+        expected = cond.get("value")
+        try:
+            if operator == "==":
+                matched = actual == expected
+            elif operator == "!=":
+                matched = actual != expected
+            elif actual is None or expected is None:
+                matched = False
+            elif operator == ">":
+                matched = actual > expected
+            elif operator == "<":
+                matched = actual < expected
+            elif operator == ">=":
+                matched = actual >= expected
+            elif operator == "<=":
+                matched = actual <= expected
+            else:
+                matched = False
+        except TypeError:
+            matched = False
+        if not matched:
+            return {"triggered": False, "actions": [], "reason": f"condition not met: {cond.get('field')} {operator}"}
+    return {"triggered": True, "actions": list(definition.get("actions") or [])}
+
+
 def _build_automation(trigger: str, actions: list[str], conditions: list[str] = None, department: str = "") -> dict:
+    safe_actions = [str(a).strip()[:_AUTOMATION_MAX_TEXT] for a in (actions or [])]
+    safe_actions = [a for a in safe_actions if a][:_AUTOMATION_MAX_ACTIONS]
+    parsed_conditions: list[dict] = []
+    invalid_conditions: list[str] = []
+    for raw in (conditions or ['status == "pending"']):
+        parsed, invalid = _parse_automation_condition(str(raw))
+        if parsed is not None:
+            parsed_conditions.append(parsed)
+        else:
+            invalid_conditions.append(str(raw)[:_AUTOMATION_MAX_TEXT])
+    definition = {
+        "format": _AUTOMATION_FORMAT,
+        "trigger": str(trigger or "").strip()[:_AUTOMATION_MAX_TEXT],
+        "department": str(department or "").strip()[:_AUTOMATION_MAX_TEXT],
+        "conditions": parsed_conditions,
+        "invalid_conditions": invalid_conditions,
+        "actions": safe_actions,
+        "requires_review": True,
+        "executable_code": False,
+    }
+    per_action_hours = 2
     return {
-        "automation_script": f"""
-# {trigger.title()} Automation - {department}
-# Trigger: {trigger}
-# Actions: {', '.join(actions)}
-
-def handle_trigger(event):
-    if validate_conditions(event):
-        execute_actions(event)
-        notify_stakeholders(event)
-        log_automation(event)
-
-def validate_conditions(event):
-    {' and '.join([f'event.get("{c}")' for c in (conditions or ['status == "pending"'])] )}
-    return True
-
-def execute_actions(event):
-    for action in {actions[:3]}:
-        process_action(action, event)
-
-def notify_stakeholders(event):
-    send_notification(event['owner'], f"Automation completed: {event['type']}")
-
-def log_automation(event):
-    audit_log.append({{"event": event, "timestamp": datetime.now(), "status": "completed"}})
-""",
+        "automation_script": json.dumps(definition, indent=2),
+        "automation_definition": definition,
+        "requires_review": True,
+        "invalid_conditions": invalid_conditions,
         "integration_points": [
             "Workflow engine API",
             "Notification service webhook",
@@ -646,8 +749,9 @@ def log_automation(event):
             "Employee database",
             "Audit logging service",
         ],
-        "estimated_savings": f"{random.randint(10, 100)} hours/month",
+        "estimated_savings": f"~{max(1, len(safe_actions)) * per_action_hours} hours/month (rough estimate, review before use)",
         "validation_steps": [
+            "Review the automation definition above before enabling it.",
             "Test automation in staging environment first.",
             "Verify all integration points are functional.",
             "Set up monitoring and alerting for automation failures.",
