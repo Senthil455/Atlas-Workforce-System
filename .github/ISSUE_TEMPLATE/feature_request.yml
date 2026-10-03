@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a small, scoped enhancement
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: input
+    id: service
+    attributes:
+      label: Service
+      placeholder: e.g. lms-service:8013
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      placeholder: What backlog pain does this solve? Keep it to one service if possible.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution + acceptance criteria
+      placeholder: |
+        - [ ] criterion 1 (testable)
+        - [ ] criterion 2
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: sprint
+    attributes:
+      label: Sprint 26
+      options:
+        - label: I understand only issues labeled `osn-sprint-26` by maintainers are in sprint scope
+        - label: I will wait to be assigned before opening a PR

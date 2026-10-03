@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Sprint 26 Mentor Help (WhatsApp / Discord)
+    url: https://opensourcenest.dev
+    about: Stuck? Ask OSN mentors on WhatsApp/Discord — do not DM the maintainer directly.
+  - name: Security issue?
+    url: https://github.com/Senthil455/Atlas-Workforce-System/blob/main/SECURITY.md
+    about: Do NOT file public issues for vulnerabilities. Email senthilrajasen637@gmail.com instead.

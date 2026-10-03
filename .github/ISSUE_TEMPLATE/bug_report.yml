@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible bug in one service
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: service
+    attributes:
+      label: Service
+      description: e.g. frontend / auth-service:8010 / attendance-service:8005
+      placeholder: frontend
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. cp .env.example .env and docker compose up --build
+        2. ...
+        3. Seen vs expected?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / evidence
+      description: Paste `docker compose logs <service>` excerpt, screenshots, commit SHA
+      render: shell
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: OS, Docker version, commit SHA
+  - type: checkboxes
+    id: sprint
+    attributes:
+      label: Sprint 26
+      options:
+        - label: I am filing this during Sprint 26 and understand maintainers will label scoped tasks `osn-sprint-26`
+        - label: I have read CONTRIBUTING.md and will comment to claim before opening a PR

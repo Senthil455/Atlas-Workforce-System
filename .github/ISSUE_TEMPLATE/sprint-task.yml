@@ -1,0 +1,52 @@
+name: Sprint task (OSN-26)
+description: Maintainer-scoped Sprint 26 task — will be labeled osn-sprint-26
+title: "[Sprint]: "
+labels: ["osn-sprint-26"]
+body:
+  - type: input
+    id: service
+    attributes:
+      label: Service + port
+      placeholder: e.g. ats-service:8012
+    validations:
+      required: true
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: Difficulty
+      options:
+        - good first issue
+        - medium
+        - advanced (mentor guidance needed)
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope (one service, files/area)
+      placeholder: e.g. services/ats-service — add missing pytest for POST /api/v1/candidates
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] `pytest -v` / `npm test` / `go test ./...` / `mvn clean test` passes
+    validations:
+      required: true
+  - type: textarea
+    id: hints
+    attributes:
+      label: Hints for contributors
+      placeholder: Relevant files, docs link, how to run locally
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Sprint rules (contributors must follow)
+      options:
+        - label: Comment to claim and wait for assignment — no PR without assignment
+          required: true
+        - label: Ask mentors on WhatsApp/Discord if stuck — do not ping maintainer
+          required: true
