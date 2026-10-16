@@ -208,6 +208,7 @@ Use the issue templates (`.github/ISSUE_TEMPLATE/`). Include: service + port, re
 
 ---
 
+
 ## 10. Maintainers
 
 - Async-first: GitHub issues/PRs beat DMs. Author: Senthil Raja R — see `README.md` for contact.
@@ -215,6 +216,7 @@ Use the issue templates (`.github/ISSUE_TEMPLATE/`). Include: service + port, re
 
 Thank you for contributing to Atlas. Happy sprint!
 
+---
 
 ## 11. Definition of Done (DoD)
 
@@ -231,11 +233,15 @@ Before requesting review, contributors should ensure:
 
 For non-applicable items, mark N/A with a brief explanation in the pull request.
 
+For blocked items, explain why, link a follow-up issue, and obtain mentor or maintainer approval before merging.
+
+The DoD applies to bug fixes, features, documentation updates, tests, and maintenance changes. Reviewers should apply it proportionately to the scope of each change.
+
+---
 
 ## 12. Changelog and Release Notes
 
-We use GitHub Release Drafter to automatically prepare
-draft release notes from merged pull requests.
+We use GitHub Release Drafter to automatically prepare draft release notes from merged pull requests.
 
 ### Pull Request Titles
 
@@ -267,13 +273,8 @@ Maintainers should apply the appropriate label:
 5. Maintainers review the draft for accuracy and security.
 6. Maintainers publish releases manually.
 
-Never publish security-sensitive details before an
-appropriate disclosure or remediation process.
+Never publish security-sensitive details before an appropriate disclosure or remediation process.
 
 See `CHANGELOG.md` for release history.
 
-
-For blocked items, explain why, link a follow-up issue, and obtain mentor or maintainer approval before merging.
-
-The DoD applies to bug fixes, features, documentation updates, tests, and maintenance changes. Reviewers should apply it proportionately to the scope of each change.
   
