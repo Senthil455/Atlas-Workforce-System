@@ -20,20 +20,38 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed solution + acceptance criteria
+      label: Proposed solution + Definition of Done acceptance criteria
+      description: Detail the solution and outline measurable criteria mapped to the Definition of Done (tests, docs, security, migration)
       placeholder: |
-        - [ ] criterion 1 (testable)
-        - [ ] criterion 2
+        - [ ] Core functionality implemented
+        - [ ] Unit / integration tests added
+        - [ ] Multi-tenant isolation verified
+        - [ ] Documentation updated
+        - [ ] No security / auth weakening
+    validations:
+      required: true
+  - type: textarea
+    id: env_tenant_context
+    attributes:
+      label: Target environment & tenant context
+      description: Outline applicable service versions, deployment environment, and tenant/role impact
+      placeholder: |
+        - Target environment: (Docker Compose local / Kubernetes / production)
+        - Tenant scope: (single tenant, multi-tenant global, tenant-specific config)
+        - Affected roles: (admin, HR manager, employee)
+        - Database / Migration impact: (new collections/tables, schema changes, or none)
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
+      placeholder: Any alternative approaches or workarounds considered?
   - type: checkboxes
     id: sprint
     attributes:
-      label: Sprint 26
+      label: Sprint 26 & Definition of Done
       options:
         - label: I understand only issues labeled `osn-sprint-26` by maintainers are in sprint scope
+        - label: I agree to adhere to the CONTRIBUTING.md Definition of Done (tests, docs, security, migrations)
         - label: I will wait to be assigned before opening a PR

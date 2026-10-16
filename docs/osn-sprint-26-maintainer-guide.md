@@ -36,19 +36,40 @@ Each issue must have: scope (one service), acceptance criteria, repro/test comma
 - *Does your repo have topic osn-sprint-26?* → **Yes** (after step 1).
 - *Maintainer Agreements* → check: you agree to label issues `osn-sprint-26`, let mentors review first, and merge mentor-approved PRs promptly during the 4 weeks.
 
-## 5. During the sprint (your shield workflow)
+## 5. Definition of Done (DoD) & Calibration Strategy
+
+Sprint 26 codifies a clear **Definition of Done (DoD)** in `CONTRIBUTING.md` and aligns PR/issue templates to enforce it lightly:
+
+- **Core DoD Pillars**:
+  1. **Automated Tests**: Unit/integration tests mandatory for any logic change; regression tests for bug fixes; multi-tenant isolation tests ("what about tenant X?").
+  2. **Documentation & Config**: Code docstrings, API/guide updates, and `.env.example` sync.
+  3. **Security & Zero-Trust**: Zero secret commits, strict tenant isolation (`tenant_id`), input sanitization, and clean dependency audits.
+  4. **Backward Compatibility**: Safe database migrations and zero breaking changes.
+  5. **Escape Hatch**: A contributor may defer non-critical secondary items only by opening a tracking issue linked in their PR DoD checklist and getting mentor approval.
+
+- **One Sprint of Gentle Enforcement (Calibration Strategy)**:
+  - **Calibrate, don't block immediately**: During Sprint 26, mentors and maintainers should gently enforce the DoD checklist. If a contributor misses tests, docs, or tenant isolation checks, point them kindly to the DoD section in `CONTRIBUTING.md` and ask them to complete it.
+  - **Use the escape hatch constructively**: If a contributor has fixed a bug with good unit tests but needs more time for exhaustive multi-service integration tests or comprehensive docs, approve the use of the "needs follow-up issue" escape hatch with a linked issue rather than rejecting the PR.
+  - **Review cadence**: Mentors verify the DoD checklist during first-pass triage. Maintainer conducts final validation against DoD before merging.
+
+---
+
+## 6. During the sprint (your shield workflow)
 
 1. Contributor comments to claim → assign them.
-2. Contributor opens PR → **mentor reviews first** (style/tests). You don't need to jump in yet.
+2. Contributor opens PR → **mentor reviews first** (style/tests, DoD compliance). You don't need to jump in yet.
 3. Mentor approves (or adds `osn-mentor-approved`) → you do **final review + merge**.
 4. Close / unassign stale claims after ~3–4 days of silence so others can pick them up.
 5. Never merge PRs with failing CI, secrets, or no linked assigned issue.
 
 Async-first per README footer: GitHub > meetings.
 
-## 6. After the sprint
+---
+
+## 7. After the sprint
 
 - Export merged PRs / mentor notes for contributor records.
 - Remove or keep `osn-sprint-26` label as archived; keep `CONTRIBUTING.md`/`CODE_OF_CONDUCT.md`/`SECURITY.md` permanently.
 
 Good luck — clear that backlog!
+

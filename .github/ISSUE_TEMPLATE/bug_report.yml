@@ -15,27 +15,50 @@ body:
     id: repro
     attributes:
       label: Steps to reproduce
+      description: Step-by-step instructions to reproduce the issue
       placeholder: |
         1. cp .env.example .env and docker compose up --build
-        2. ...
-        3. Seen vs expected?
+        2. Navigate to ...
+        3. Trigger action ...
+        4. Observed behavior vs Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: tenant_setup
+    attributes:
+      label: Tenant setup & user context
+      description: Multi-tenant configuration, tenant ID, and user role during reproduction
+      placeholder: |
+        - Tenant setup: (e.g. single tenant / multi-tenant isolation enabled)
+        - Tenant ID: (e.g. tenant-001 or N/A)
+        - User role: (e.g. admin@atlas.io, manager, employee)
+        - Permissions: (e.g. default roles, customized RBAC)
+    validations:
+      required: true
+  - type: textarea
+    id: env_versions
+    attributes:
+      label: Environment & versions
+      description: Provide system versions and commit SHA
+      placeholder: |
+        - OS: (e.g. macOS 14 / Ubuntu 22.04 / Windows 11)
+        - Docker version: (e.g. Docker 26.0 / Docker Compose v2.27)
+        - Node / Python / Go / Java version: (if running locally without Docker)
+        - Commit SHA / Git branch: (e.g. git rev-parse --short HEAD)
+        - Browser & version: (if frontend bug, e.g. Chrome 124)
     validations:
       required: true
   - type: textarea
     id: logs
     attributes:
       label: Logs / evidence
-      description: Paste `docker compose logs <service>` excerpt, screenshots, commit SHA
+      description: Paste relevant `docker compose logs <service>` excerpts, stack traces, or terminal output
       render: shell
-  - type: input
-    id: env
-    attributes:
-      label: Environment
-      placeholder: OS, Docker version, commit SHA
   - type: checkboxes
     id: sprint
     attributes:
-      label: Sprint 26
+      label: Sprint 26 & Definition of Done
       options:
         - label: I am filing this during Sprint 26 and understand maintainers will label scoped tasks `osn-sprint-26`
-        - label: I have read CONTRIBUTING.md and will comment to claim before opening a PR
+        - label: I have read CONTRIBUTING.md and understand the Definition of Done (DoD) requirements
+        - label: I will comment to claim and wait for assignment before opening a PR

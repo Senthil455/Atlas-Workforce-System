@@ -166,11 +166,44 @@ make test-e2e   # Playwright chromium suite
 
 ---
 
-## 6. Pull Request process
+## 6. Definition of Done (DoD)
+
+Every Pull Request must satisfy the **Definition of Done** before it can be approved and merged. This bar ensures we do not regress on stability, security, or maintainability:
+
+1. **Tests (Mandatory)**:
+   - **Coverage**: Every new feature or bug fix must include automated tests in the relevant stack (`pytest`, `vitest`, `go test`, or `mvn test`).
+   - **Regression & Edge Cases**: Bug fixes must include a regression test proving the bug existed and is now fixed. Include negative test cases (invalid inputs, unauthorized access, boundary conditions).
+   - **Multi-Tenant Isolation**: If touching data queries or domain entities, verify that operations are scoped to `tenant_id` and cannot leak across tenants ("what about tenant X?").
+   - **Local Pass**: All existing and new tests must pass cleanly (`make test`).
+
+2. **Documentation & Changelog**:
+   - **Code & API Docs**: Document public methods, OpenAPI/FastAPI endpoint summaries, and parameters.
+   - **Docs & Architecture**: If an endpoint, CLI command, config, or architecture pattern changes, update the relevant markdown files under `docs/` or `README.md`.
+   - **Environment Variables**: Any new environment variable MUST be added to `.env.example` with clear comments explaining purpose, format, and default value.
+   - **Changelog Fragment**: Summarize the change in the PR description, noting any breaking changes or user-facing behavior adjustments.
+
+3. **Security & Zero-Trust**:
+   - **Zero Secrets**: Never commit secrets, tokens, private keys, or `.env` files.
+   - **Auth & RBAC**: Verify permissions and roles (`ROLE_ADMIN`, `ROLE_MANAGER`, etc.) on all protected endpoints.
+   - **Input Sanitization & Injection Defense**: Parameterize all database queries (SQL/Mongo), sanitize inputs, and prevent XSS/CSRF.
+   - **Dependencies**: New dependencies must be justified and clean (`npm audit --audit-level=high` clean).
+
+4. **Database Migrations & Backward Compatibility (when applicable)**:
+   - **Non-breaking**: Database schema changes must be backward-compatible (e.g., new columns must be nullable or have safe defaults; do not drop columns in the same release).
+   - **Migrations**: Include corresponding migration scripts (Flyway/Alembic/Prisma) tested against clean and existing databases.
+   - **Rollback**: Document rollback steps or downgrade compatibility notes.
+
+5. **Definition of Done Escape Hatch ("Needs Follow-up Issue")**:
+   - If a minor secondary item (e.g. follow-up integration test for a peripheral edge case or a non-blocking doc polish) cannot be completed within the current PR, you MUST open a tracking issue, link it in your PR checklist, and obtain mentor agreement. Critical core tests, security guards, and CI passes can never be deferred.
+
+---
+
+## 7. Pull Request process
 
 1. Sync with `main`, run the relevant tests/lints above.
 2. Fill in `.github/PULL_REQUEST_TEMPLATE.md` completely:
    - `Closes #<issue-number>` (must be an `osn-sprint-26` issue you were assigned).
+   - Complete the **Definition of Done** checklist (tests, docs, security, migration, or follow-up issue link).
    - Confirm: "I was assigned this issue / I read CONTRIBUTING.md".
    - Screenshots for UI changes; API examples for endpoint changes.
 3. CI must be green: `frontend-check`, `node/go/python/java-services-check`, `docker-build`, `compose-safety-check`, `k8s-validate`, `ci-coverage-check`, `e2e-tests`, `k6-performance`, `security-scan`, `guard-against-binaries`.
@@ -180,7 +213,7 @@ PRs may be closed if they: have no linked assigned issue, bundle unrelated chang
 
 ---
 
-## 7. Code style
+## 8. Code style
 
 - Frontend/Node: ESLint + Prettier conventions, TypeScript strict (`tsc --noEmit` clean).
 - Python: PEP8, max line 120 for the CI gate (`flake8` select E9,F63,F7,F82), no unused imports.
@@ -190,7 +223,7 @@ PRs may be closed if they: have no linked assigned issue, bundle unrelated chang
 
 ---
 
-## 8. Security — read before touching auth/payments
+## 9. Security — read before touching auth/payments
 
 This is an HRMS/payroll system with real PII. See [SECURITY.md](SECURITY.md).
 
@@ -202,15 +235,16 @@ This is an HRMS/payroll system with real PII. See [SECURITY.md](SECURITY.md).
 
 ---
 
-## 9. Reporting issues
+## 10. Reporting issues
 
 Use the issue templates (`.github/ISSUE_TEMPLATE/`). Include: service + port, repro steps, expected vs actual, logs (`docker compose logs <service>`), env (OS, Docker version, commit SHA). For Sprint 26 task ideas, use the **Sprint task** template and leave labeling to maintainers (`osn-sprint-26` + `good first issue` where fitting).
 
 ---
 
-## 10. Maintainers
+## 11. Maintainers
 
 - Async-first: GitHub issues/PRs beat DMs. Author: Senthil Raja R — see `README.md` for contact.
 - Maintainer Sprint checklist: [`docs/osn-sprint-26-maintainer-guide.md`](docs/osn-sprint-26-maintainer-guide.md).
 
 Thank you for contributing to Atlas. Happy sprint!
+
