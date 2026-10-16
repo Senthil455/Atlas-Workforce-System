@@ -1,21 +1,58 @@
 
-name: Release Drafter
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
 
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+categories:
+  - title: Breaking Changes
+    semver-increment: major
+    when:
+      labels:
+        - breaking
+        - breaking-change
 
-permissions:
-  contents: write
-  pull-requests: read
+  - title: Security
+    when:
+      labels:
+        - security
+        - vulnerability
 
-jobs:
-  update-release-draft:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Update draft release notes
-        uses: release-drafter/release-drafter@v7
-        with:
-          config-name: release-drafter.yml
+  - title: Features
+    semver-increment: minor
+    when:
+      labels:
+        - feature
+        - enhancement
+
+  - title: Bug Fixes
+    when:
+      labels:
+        - bug
+        - fix
+        - bugfix
+
+  - title: Dependencies
+    when:
+      labels:
+        - dependencies
+        - dependency
+
+  - title: Documentation and Maintenance
+    when:
+      labels:
+        - documentation
+        - chore
+        - maintenance
+
+  - type: version-resolver
+    semver-increment: patch
+
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  ---
+  These notes are generated automatically.
+  Maintainers review and publish releases manually.
