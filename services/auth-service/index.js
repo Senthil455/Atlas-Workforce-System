@@ -143,6 +143,14 @@ const AUDIT_WRITER_AUDIENCE = 'audit-writer';
 const SAML_IDP_SSO_URL = process.env.SAML_IDP_SSO_URL || '';
 const SAML_IDP_ENTITY_ID = process.env.SAML_IDP_ENTITY_ID || '';
 const SAML_IDP_CERT = (process.env.SAML_IDP_CERT || '').replace(/\\n/g, '\n');
+// Tenant assigned to accounts provisioned Just-In-Time by a SAML login. The
+// flow carries no tenant hint from the IdP, so the SP pins it server-side.
+const SAML_TENANT_ID = process.env.SAML_TENANT_ID || 'default';
+// AuthnRequest identifiers are persisted for a short window so the ACS can
+// match InResponseTo, enforce one-time consumption, and reject replayed
+// assertions even when their own conditions are still inside their lifetime.
+const SAML_AUTHN_REQUEST_TTL_MINUTES = 10;
+const SAML_AUTHN_REQUEST_ID_PATTERN = /^_[0-9a-f]{32}$/;
 const SCIM_API_KEY = process.env.SCIM_API_KEY;
 const SCIM_ALLOWED_ROLES = ['employee'];
 
@@ -917,8 +925,11 @@ setInterval(async () => {
   try {
     await pool.query("DELETE FROM failed_attempts WHERE locked_until IS NULL AND updated_at < NOW() - INTERVAL '1 hour'");
     await pool.query('DELETE FROM failed_attempts WHERE locked_until IS NOT NULL AND locked_until < NOW()');
+    // Keep SAML request ids for an hour past expiry (replay diagnostics), then
+    // drop them; their assertions have long expired by that point.
+    await pool.query("DELETE FROM saml_authn_requests WHERE expires_at < NOW() - INTERVAL '1 hour'");
   } catch (err) {
-    safeLog(console.error, 'Failed to sweep stale failed_attempts rows:', err);
+    safeLog(console.error, 'Failed to sweep stale rows:', err);
   }
 }, 10 * 60 * 1000);
 
@@ -1236,6 +1247,22 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
+  // Issued SAML AuthnRequest identifiers, kept for a short TTL so the ACS can
+  // match InResponseTo and enforce one-time consumption. Consumed rows are
+  // retained until cleanup so replays can be distinguished from forgery.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS saml_authn_requests (
+      request_id VARCHAR(128) PRIMARY KEY,
+      tenant_id VARCHAR(50) DEFAULT 'default',
+      expires_at TIMESTAMP NOT NULL,
+      consumed_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_saml_authn_requests_expires ON saml_authn_requests (expires_at)');
+  } catch (err) { /* index may exist */ }
 
   const adminCheck = await pool.query('SELECT * FROM users WHERE email = $1', [
     'admin@atlas.io',
@@ -2342,6 +2369,65 @@ app.delete('/scim/v2/Users/:id', requireScimAuth, createUserRateLimiter('scim_de
   }
 });
 
+// ── SAML AuthnRequest tracking ─────────────────────────────────────────────
+
+function generateSamlRequestId() {
+  return `_${crypto.randomBytes(16).toString('hex')}`;
+}
+
+function buildSamlAuthnRequest({ requestId, issueInstant, entityId, acsUrl, idpSsoUrl }) {
+  return `<?xml version="1.0"?>
+<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${requestId}" Version="2.0" IssueInstant="${issueInstant}" Destination="${idpSsoUrl}" AssertionConsumerServiceURL="${acsUrl}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">
+  <saml:Issuer>${entityId}</saml:Issuer>
+  <samlp:NameIDPolicy Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" AllowCreate="true"/>
+</samlp:AuthnRequest>`;
+}
+
+// Persist an issued AuthnRequest id. If the write fails the caller must not
+// hand the request to the IdP: an id the SP cannot remember is an id whose
+// response the SP cannot distinguish from a replay, so the flow fails closed.
+async function recordSamlAuthnRequest(requestId, tenantId) {
+  const expiresAt = new Date(Date.now() + SAML_AUTHN_REQUEST_TTL_MINUTES * 60 * 1000);
+  await pool.query(
+    'INSERT INTO saml_authn_requests (request_id, tenant_id, expires_at) VALUES ($1, $2, $3)',
+    [requestId, tenantId || SAML_TENANT_ID, expiresAt]
+  );
+  return expiresAt;
+}
+
+// Atomically redeem an AuthnRequest id: only the first caller for a matching,
+// unconsumed, unexpired id gets a row back. Concurrency-safe (single UPDATE),
+// so two assertions racing to reuse one id cannot both succeed.
+async function consumeSamlAuthnRequest(requestId) {
+  const result = await pool.query(
+    `UPDATE saml_authn_requests
+     SET consumed_at = NOW()
+     WHERE request_id = $1 AND consumed_at IS NULL AND expires_at > NOW()
+     RETURNING request_id`,
+    [requestId]
+  );
+  return result.rows.length > 0;
+}
+
+function extractSamlInResponseTo(doc) {
+  const candidates = [];
+  const root = doc && doc.documentElement;
+  if (root && root.getAttribute) {
+    candidates.push(root.getAttribute('InResponseTo'));
+  }
+  const nodes = doc.getElementsByTagNameNS
+    ? doc.getElementsByTagNameNS('urn:oasis:names:tc:SAML:2.0:assertion', 'SubjectConfirmationData')
+    : doc.getElementsByTagName('SubjectConfirmationData');
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].getAttribute) candidates.push(nodes[i].getAttribute('InResponseTo'));
+  }
+  for (const value of candidates) {
+    const trimmed = String(value || '').trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
 app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) => {
   try {
     const { SAMLResponse } = req.body;
@@ -2384,6 +2470,25 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
 
     if (!signatureVerified) {
       return res.status(401).json({ message: 'SAML signature verification failed' });
+    }
+
+    // Response correlation and replay protection. The assertion must name the
+    // AuthnRequest this service issued (InResponseTo); the id is redeemed
+    // exactly once below, after the assertion itself has passed validation.
+    const inResponseTo = extractSamlInResponseTo(doc);
+    if (!inResponseTo) {
+      await sendAuditEvent('auth.saml_login_rejected', null, null, {
+        reason: 'missing_in_response_to',
+        ip_address: req.ip
+      });
+      return res.status(401).json({ message: 'SAML response is not tied to a login request (InResponseTo missing)' });
+    }
+    if (!SAML_AUTHN_REQUEST_ID_PATTERN.test(inResponseTo)) {
+      await sendAuditEvent('auth.saml_login_rejected', null, null, {
+        reason: 'malformed_in_response_to',
+        ip_address: req.ip
+      });
+      return res.status(401).json({ message: 'SAML response references an unknown login request' });
     }
 
     const conditions = doc.getElementsByTagNameNS
@@ -2454,6 +2559,31 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       }
     }
 
+    // Redeem the referenced AuthnRequest exactly once. Until this point the
+    // response has only been read; a captured assertion now fails here on its
+    // second presentation even if its own conditions are still valid.
+    const requestConsumed = await consumeSamlAuthnRequest(inResponseTo);
+    if (!requestConsumed) {
+      // Diagnostics only: the client always gets the same answer for unknown,
+      // expired and already-redeemed request ids.
+      let reason = 'unknown_request_id';
+      try {
+        const lookup = await pool.query(
+          'SELECT consumed_at, expires_at FROM saml_authn_requests WHERE request_id = $1',
+          [inResponseTo]
+        );
+        const row = lookup.rows[0];
+        if (row && row.consumed_at) reason = 'replayed_response';
+        else if (row && new Date(row.expires_at) <= new Date()) reason = 'expired_request_id';
+      } catch { /* keep the generic reason */ }
+      await sendAuditEvent('auth.saml_login_rejected', null, null, {
+        reason,
+        request_id: inResponseTo,
+        ip_address: req.ip
+      });
+      return res.status(401).json({ message: 'SAML response replay or stale login request rejected' });
+    }
+
     const ns = 'urn:oasis:names:tc:SAML:2.0:assertion';
 
     let email = '';
@@ -2487,17 +2617,37 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       return res.status(400).json({ message: 'Could not extract user identity from SAML response' });
     }
 
-    let userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    // The asserted address is identity data from the IdP: normalize before any
+    // lookup or insert so address variants map to one account, and reject
+    // malformed values instead of persisting them.
+    const normalizedEmail = normalizeEmail(email);
+    const emailError = validateEmail(normalizedEmail);
+    if (emailError) {
+      await sendAuditEvent('auth.saml_login_rejected', null, null, {
+        reason: 'invalid_asserted_email',
+        ip_address: req.ip
+      });
+      return res.status(400).json({ message: `SAML asserted email is invalid: ${emailError}` });
+    }
+
+    let userResult = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
     let userData;
+    let provisioned = false;
 
     if (userResult.rows.length === 0) {
+      // JIT provisioning: the SP pins the tenant (SAML_TENANT_ID), grants the
+      // least-privileged role explicitly, and marks the account active in the
+      // insert rather than relying on column defaults.
       const tempPassword = crypto.randomBytes(16).toString('hex');
       const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_COST);
       userResult = await pool.query(
-        'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING *',
-        [email, hashedPassword, displayName || email]
+        `INSERT INTO users (email, password, name, role, department, position, tenant_id, active)
+         VALUES ($1, $2, $3, 'employee', 'General', 'Staff', $4, true)
+         RETURNING *`,
+        [normalizedEmail, hashedPassword, displayName || normalizedEmail, SAML_TENANT_ID]
       );
       userData = userResult.rows[0];
+      provisioned = true;
     } else {
       userData = userResult.rows[0];
     }
@@ -2506,9 +2656,17 @@ app.post('/saml/acs', createUserRateLimiter('saml_acs', 20), async (req, res) =>
       return res.status(403).json({ message: 'Account is deactivated' });
     }
 
+    if (provisioned) {
+      await sendAuditEvent('auth.saml_user_provisioned', userData.id, normalizedEmail, {
+        tenant_id: userData.tenant_id,
+        role: userData.role,
+        source: 'saml-jit'
+      });
+    }
+
     const { sessionId, accessToken: token } = await issueLoginSession(userData, req, res);
 
-    await sendAuditEvent('auth.saml_login', userData.id, email, {
+    await sendAuditEvent('auth.saml_login', userData.id, normalizedEmail, {
       ip_address: req.ip,
       session_id: sessionId
     });
@@ -2549,11 +2707,19 @@ app.post('/saml/login', createUserRateLimiter('saml_login', 20), async (req, res
     const entityId = `${req.protocol}://${req.get('host')}/saml/metadata`;
     const acsUrl = `${req.protocol}://${req.get('host')}/saml/acs`;
 
-    const samlRequest = `<?xml version="1.0"?>
-<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_${crypto.randomBytes(16).toString('hex')}" Version="2.0" IssueInstant="${new Date().toISOString()}" Destination="${SAML_IDP_SSO_URL}" AssertionConsumerServiceURL="${acsUrl}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">
-  <saml:Issuer>${entityId}</saml:Issuer>
-  <samlp:NameIDPolicy Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" AllowCreate="true"/>
-</samlp:AuthnRequest>`;
+    const requestId = generateSamlRequestId();
+    const issueInstant = new Date().toISOString();
+    // Persist before returning the redirect URL: if this fails the request is
+    // never handed to the IdP, so no unverifiable response can come back.
+    await recordSamlAuthnRequest(requestId, SAML_TENANT_ID);
+
+    const samlRequest = buildSamlAuthnRequest({
+      requestId,
+      issueInstant,
+      entityId,
+      acsUrl,
+      idpSsoUrl: SAML_IDP_SSO_URL,
+    });
 
     const encodedRequest = Buffer.from(samlRequest).toString('base64');
 
@@ -3637,6 +3803,12 @@ module.exports = {
   hashToken,
   sanitizeUser,
   resolveOktaBaseUrl,
+  generateSamlRequestId,
+  buildSamlAuthnRequest,
+  extractSamlInResponseTo,
+  SAML_AUTHN_REQUEST_TTL_MINUTES,
+  SAML_AUTHN_REQUEST_ID_PATTERN,
+  SAML_TENANT_ID,
   getScimKeyId,
   requireCsrfDoubleSubmit,
   mintCsrfCookie,

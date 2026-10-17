@@ -1,9 +1,18 @@
 // Dummy env so the service module can be required without real secrets.
+// Keep this block in sync with the fatal startup checks in index.js; the
+// module refuses to load (process.exit) when any of them is missing.
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'unit-test-jwt-secret-value';
 process.env.ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD || 'unit-test-admin-password';
 process.env.AUDIT_INTERNAL_KEY = process.env.AUDIT_INTERNAL_KEY || 'unit-test-audit-key';
 process.env.SCIM_API_KEY = process.env.SCIM_API_KEY || 'unit-test-scim-key';
 process.env.POSTGRES_URL = process.env.POSTGRES_URL || 'postgresql://test:test@localhost:5432/test';
+process.env.ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || 'http://localhost:3000';
+process.env.AUDIT_SERVICE_URL = process.env.AUDIT_SERVICE_URL || 'http://localhost:8011';
+process.env.INTERNAL_JWT_SECRET = process.env.INTERNAL_JWT_SECRET || 'unit-test-internal-secret-value';
+process.env.MFA_STEPUP_SECRET = process.env.MFA_STEPUP_SECRET || 'unit-test-mfa-stepup-secret-value';
+process.env.OAUTH_ENCRYPTION_KEY = process.env.OAUTH_ENCRYPTION_KEY || 'unit-test-oauth-encryption-key-value';
+process.env.REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 const assert = require('assert');
 const { validatePassword, hashToken, sanitizeUser } = require('./index');
