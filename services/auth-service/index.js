@@ -59,7 +59,10 @@ promClient.collectDefaultMetrics();
 const app = express();
 app.use(helmet());
 // Cookie-authenticated unsafe routes (/refresh, /logout) enforce
-// double-submit CSRF tokens (see requireCsrfDoubleSubmit); every other
+// double-submit CSRF tokens (see requireCsrfDoubleSubmit): they require the
+// readable csrf_token cookie echoed in the x-csrf-token header and fail closed
+// when it is missing. Requests that authenticate with a Bearer header are
+// exempt because browsers never attach that header cross-site; every other
 // state-changing route authenticates with Bearer JWTs, which are immune to
 // CSRF. All cookies are SameSite=strict.
 // codeql[js/missing-token-validation]
@@ -760,19 +763,32 @@ function requireScimAuth(req, res, next) {
 const rateLimitStore = new Map();
 
 // Double-submit CSRF protection for cookie-authenticated routes (/refresh,
-// /logout), mirroring the api-gateway policy. Browser clients carry a
-// readable csrf_token cookie and must echo it in the x-csrf-token header on
-// unsafe requests. Requests without the cookie (curl, mobile, service
-// clients) pass through. All other state-changing routes use Bearer JWTs,
-// which are immune to CSRF.
+// /logout), mirroring the api-gateway policy. The rule keys on how the request
+// authenticated: header-borne credentials (Authorization: Bearer) are never
+// attached automatically by a browser to a cross-site request, so they are
+// exempt; cookie-authenticated requests must carry the readable csrf_token
+// cookie and echo it in the x-csrf-token header. A missing cookie now fails
+// closed. All other state-changing routes use Bearer JWTs, which are immune to
+// CSRF. Machine clients authenticate with Bearer (seed script, k6) or carry
+// cookie + header.
 function requireCsrfDoubleSubmit(req, res, next) {
-  const cookieToken = req.cookies?.csrf_token;
-  if (!cookieToken) return next();
-  const headerToken = req.headers['x-csrf-token'];
-  if (typeof headerToken === 'string' && headerToken.length > 0 && headerToken === cookieToken) {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     return next();
   }
-  return res.status(403).json({ message: 'CSRF token mismatch' });
+  const cookieToken = req.cookies?.csrf_token;
+  const headerToken = req.headers['x-csrf-token'];
+  if (
+    typeof cookieToken === 'string' && cookieToken.length > 0 &&
+    typeof headerToken === 'string' && headerToken.length > 0 &&
+    headerToken === cookieToken
+  ) {
+    return next();
+  }
+  return res.status(403).json({
+    message: 'CSRF token validation failed',
+    detail: 'This endpoint authenticates with cookies and requires the csrf_token cookie echoed in the x-csrf-token header',
+  });
 }
 
 function mintCsrfCookie(res) {

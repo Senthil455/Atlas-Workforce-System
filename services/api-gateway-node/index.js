@@ -785,13 +785,16 @@ async function authMiddleware(req, res, next) {
   }
 
   let token = null;
+  let authScheme = null;
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     token = authHeader.slice(7);
+    authScheme = 'bearer';
   } else if (req.path.startsWith('/api/live')) {
     try {
       const url = new URL(req.originalUrl || req.url, 'http://localhost');
       token = url.searchParams.get('token');
+      if (token) authScheme = 'query';
     } catch {}
   }
   if (!token) {
@@ -842,6 +845,7 @@ async function authMiddleware(req, res, next) {
   }
 
   req.user = payload;
+  req.authScheme = authScheme;
   next();
 }
 
@@ -899,43 +903,103 @@ app.use(rbacMiddleware);
 app.use(auditProxyMiddleware);
 app.use(mfaStepUpMiddleware);
 
+// Routes whose authentication comes from an ambient cookie (the refresh
+// cookie minted by auth-service) rather than an explicit header. Browsers
+// attach ambient cookies automatically to cross-site requests, so these are
+// exactly the routes where the double-submit proof is mandatory.
+const CSRF_COOKIE_AUTHENTICATED_ROUTES = ['/api/auth/refresh', '/api/auth/logout'];
+
+// /api/auth/mfa/validate authenticates with the single-use mfa_challenge_token
+// carried in the request body (login MFA step), never with an ambient cookie,
+// so a cross-site request cannot exercise a victim's session through it.
+const CSRF_BODY_CREDENTIAL_ROUTES = ['/api/auth/mfa/validate'];
+
+function pathMatchesRoute(path, route) {
+  return path === route || path.startsWith(route + '/');
+}
+
+// Header-borne credentials are never attached automatically by a browser to a
+// cross-site request, so they are immune to CSRF. This covers the Bearer
+// access token, the /api/live query token, and the SCIM provisioning key.
+// Machine clients therefore keep a documented path: scripts/seed-data.ps1 and
+// the k6 scripts authenticate with Authorization: Bearer, IdP provisioning
+// sends x-api-key, and any other client may carry the csrf_token cookie and
+// echo it in the x-csrf-token header.
+function hasHeaderCredential(req) {
+  if (req.authScheme === 'bearer' || req.authScheme === 'query') return true;
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) return true;
+  const apiKey = req.headers['x-api-key'];
+  if (typeof apiKey === 'string' && apiKey.trim().length > 0) return true;
+  return false;
+}
+
 function csrfMiddleware(req, res, next) {
   if (isPublicOrAuthPath(req.path)) return next();
 
-  // Refresh and logout are cookie-based and must not require double-submit
-  const csrfExempt = ['/api/auth/refresh', '/api/auth/logout', '/api/auth/token'];
-  if (csrfExempt.some((p) => req.path === p || req.path.startsWith(p + '/') || req.path.startsWith(p + '?'))) {
-    return next();
+  const cookieToken = req.cookies?.csrf_token;
+  if (req.user && !cookieToken) {
+    mintCsrfCookie(res);
   }
 
-  if (req.user && !req.cookies?.csrf_token) {
-    const csrfToken = crypto.randomBytes(32).toString('hex');
-    res.cookie('csrf_token', csrfToken, {
-      httpOnly: false,
-      secure: NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 24 * 60 * 60 * 1000,
-    });
-  }
-
+  // Safe methods are not state-changing; the cookie is minted above so a
+  // browser session has the token before its first unsafe request.
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
     return next();
   }
 
-  const cookieToken = req.cookies?.csrf_token;
-  // Only enforce double-submit when a csrf cookie exists (browser session).
-  // Clients without a cookie jar (curl, seed scripts, k6) will not be blocked.
-  if (!cookieToken) {
+  // The rule keys on how the request authenticated, not on whether a cookie
+  // happens to be present. A header credential is never attached by a browser
+  // to a cross-site request, so it is exempt; a body credential does not ride
+  // an ambient session either. Everything else must prove the double submit.
+  if (hasHeaderCredential(req)) {
+    return next();
+  }
+  if (CSRF_BODY_CREDENTIAL_ROUTES.some((p) => pathMatchesRoute(req.path, p))) {
     return next();
   }
 
   const headerToken = req.headers['x-csrf-token'];
-
-  if (!headerToken || headerToken !== cookieToken) {
-    return res.status(403).json({ message: 'CSRF token validation failed' });
+  const doubleSubmitOk =
+    typeof cookieToken === 'string' && cookieToken.length > 0 &&
+    typeof headerToken === 'string' && headerToken.length > 0 &&
+    headerToken === cookieToken;
+  if (doubleSubmitOk) {
+    return next();
   }
 
-  next();
+  // Previously a request without the csrf cookie passed unchecked, so a
+  // cookie-less cross-site POST sailed through and the cookie-authenticated
+  // routes (/refresh, /logout) were exempt on top of that. The check fails
+  // closed now. On the cookie-authenticated routes a missing cookie is seeded
+  // so a legitimate browser session can echo it on the next attempt, but this
+  // response is still rejected.
+  const cookieRoute = CSRF_COOKIE_AUTHENTICATED_ROUTES.some((p) => pathMatchesRoute(req.path, p));
+  if (cookieRoute && !cookieToken) {
+    mintCsrfCookie(res);
+  }
+  console.warn('CSRF validation failed', {
+    path: req.path,
+    method: req.method,
+    cookie_authenticated_route: cookieRoute,
+    csrf_cookie_present: Boolean(cookieToken),
+  });
+  return res.status(403).json({
+    message: 'CSRF token validation failed',
+    detail: cookieRoute
+      ? 'This endpoint authenticates with cookies and requires the csrf_token cookie echoed in the x-csrf-token header'
+      : 'Unsafe requests must authenticate with a header credential (Authorization: Bearer or x-api-key) or present the double-submit token',
+  });
+}
+
+function mintCsrfCookie(res) {
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+  res.cookie('csrf_token', csrfToken, {
+    httpOnly: false,
+    secure: NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 24 * 60 * 60 * 1000,
+  });
 }
 
 app.use(csrfMiddleware);

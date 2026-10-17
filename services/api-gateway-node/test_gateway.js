@@ -37,60 +37,107 @@ function testHealthEndpoint() {
 }
 
 // CSRF middleware tests
+function makeRes(record) {
+  return {
+    statusCode: 200,
+    setHeader: () => {},
+    cookie: (...args) => { if (record) record.cookies.push(args); },
+    status(code) { this.statusCode = code; return this; },
+    json(data) { if (record) record.body = data; return this; },
+  };
+}
+
 function testCsrfMiddleware() {
   // Test 1: GET request should pass through without CSRF check
   let called = false;
   const req1 = { method: 'GET', path: '/api/employee', cookies: {}, headers: {} };
-  const res1 = { statusCode: 200, setHeader: () => {}, cookie: () => {} };
-  csrfMiddleware(req1, res1, () => { called = true; });
+  csrfMiddleware(req1, makeRes(), () => { called = true; });
   assert.strictEqual(called, true, 'GET should pass CSRF check');
   console.log('PASS: csrfMiddleware allows GET requests');
 
   // Test 2: Public auth paths should bypass CSRF
   called = false;
   const req2 = { method: 'POST', path: '/api/auth/login', cookies: {}, headers: {} };
-  csrfMiddleware(req2, res1, () => { called = true; });
+  csrfMiddleware(req2, makeRes(), () => { called = true; });
   assert.strictEqual(called, true, 'Public auth paths should bypass CSRF');
   console.log('PASS: csrfMiddleware allows public auth paths');
 
-  // Test 3: POST without CSRF cookie should pass (API clients)
+  // Test 3: Cookie-authenticated route with no cookie fails closed (this used
+  // to be the fail-open "no cookie means no check" path).
   called = false;
-  const req3 = { method: 'POST', path: '/api/employee', cookies: {}, headers: {} };
-  csrfMiddleware(req3, res1, () => { called = true; });
-  assert.strictEqual(called, true, 'POST without CSRF cookie should pass');
-  console.log('PASS: csrfMiddleware allows POST without CSRF cookie');
+  const rec3 = { cookies: [], body: null };
+  const res3 = makeRes(rec3);
+  const req3 = { method: 'POST', path: '/api/auth/refresh', cookies: {}, headers: {} };
+  csrfMiddleware(req3, res3, () => { called = true; });
+  assert.strictEqual(called, false, 'Cookie-less refresh must be rejected');
+  assert.strictEqual(res3.statusCode, 403, 'Cookie-less refresh should be 403');
+  assert.ok(String(rec3.body?.message || '').includes('CSRF'), 'Should return a CSRF error body');
+  assert.ok(rec3.cookies.some(([name]) => name === 'csrf_token'), 'Rejected cookie route should seed a csrf cookie for legitimate retries');
+  console.log('PASS: csrfMiddleware fails closed for cookie-less refresh/logout');
 
   // Test 4: POST with CSRF cookie but no header token should be blocked
   called = false;
-  let blocked = false;
+  const res4 = makeRes(null);
   const req4 = { method: 'POST', path: '/api/employee', cookies: { csrf_token: 'abc123' }, headers: {} };
-  const res4 = {
-    statusCode: 200,
-    setHeader: () => {},
-    cookie: () => {},
-    status(code) { this.statusCode = code; return this; },
-    json(data) { blocked = true; return this; }
-  };
   csrfMiddleware(req4, res4, () => { called = true; });
   assert.strictEqual(called, false, 'POST with cookie but no header should be blocked');
-  assert.strictEqual(blocked, true, 'Should return 403 JSON response');
+  assert.strictEqual(res4.statusCode, 403, 'Should return 403 JSON response');
   console.log('PASS: csrfMiddleware blocks POST with cookie but no header token');
 
   // Test 5: POST with matching CSRF cookie and header should pass
   called = false;
   const req5 = { method: 'POST', path: '/api/employee', cookies: { csrf_token: 'abc123' }, headers: { 'x-csrf-token': 'abc123' } };
-  csrfMiddleware(req5, res1, () => { called = true; });
+  csrfMiddleware(req5, makeRes(), () => { called = true; });
   assert.strictEqual(called, true, 'POST with matching cookie and header should pass');
   console.log('PASS: csrfMiddleware allows POST with matching CSRF tokens');
 
   // Test 6: POST with mismatched CSRF cookie and header should be blocked
   called = false;
-  blocked = false;
-  const req6 = { method: 'POST', path: '/api/employee', cookies: { csrf_token: 'abc123' }, headers: { 'x-csrf-token': 'xyz789' } };
-  csrfMiddleware(req6, res4, () => { called = true; });
+  const res6 = makeRes(null);
+  const req6 = { method: 'POST', path: '/api/auth/refresh', cookies: { csrf_token: 'abc123' }, headers: { 'x-csrf-token': 'xyz789' } };
+  csrfMiddleware(req6, res6, () => { called = true; });
   assert.strictEqual(called, false, 'POST with mismatched tokens should be blocked');
-  assert.strictEqual(blocked, true, 'Should return 403 JSON response');
+  assert.strictEqual(res6.statusCode, 403, 'Should return 403 JSON response');
   console.log('PASS: csrfMiddleware blocks POST with mismatched CSRF tokens');
+
+  // Test 7: header-authenticated requests are exempt, cookie-less or not
+  called = false;
+  csrfMiddleware(
+    { method: 'POST', path: '/api/employee', cookies: {}, headers: { authorization: 'Bearer token' }, authScheme: 'bearer' },
+    makeRes(),
+    () => { called = true; }
+  );
+  assert.strictEqual(called, true, 'Bearer-authenticated POST should be exempt');
+  called = false;
+  csrfMiddleware(
+    { method: 'POST', path: '/scim/v2/Users', cookies: {}, headers: { 'x-api-key': 'scim-key' } },
+    makeRes(),
+    () => { called = true; }
+  );
+  assert.strictEqual(called, true, 'SCIM x-api-key POST should be exempt');
+  console.log('PASS: csrfMiddleware exempts header-authenticated machine clients');
+
+  // Test 8: the MFA login step authenticates with the body challenge token
+  called = false;
+  csrfMiddleware(
+    { method: 'POST', path: '/api/auth/mfa/validate', cookies: {}, headers: {} },
+    makeRes(),
+    () => { called = true; }
+  );
+  assert.strictEqual(called, true, 'Body-credential MFA validation should be exempt');
+  console.log('PASS: csrfMiddleware exempts the MFA challenge body-credential route');
+
+  // Test 9: a cookie-less cross-site POST to a protected route is rejected
+  called = false;
+  const res9 = makeRes(null);
+  csrfMiddleware(
+    { method: 'POST', path: '/api/payroll/run', cookies: {}, headers: { origin: 'https://evil.example' } },
+    res9,
+    () => { called = true; }
+  );
+  assert.strictEqual(called, false, 'Cookie-less cross-site POST must be rejected');
+  assert.strictEqual(res9.statusCode, 403, 'Cross-site POST should be 403');
+  console.log('PASS: csrfMiddleware rejects cookie-less cross-site POSTs');
 }
 
 // RBAC middleware tests

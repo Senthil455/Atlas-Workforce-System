@@ -48,14 +48,19 @@ function getCsrfToken(): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+function csrfHeaders(): Record<string, string> {
+  const csrf = getCsrfToken();
+  return csrf ? { "x-csrf-token": csrf } : {};
+}
+
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const token = getAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
-  const csrf = getCsrfToken();
-  if (csrf && config.method && !['get', 'head', 'options'].includes(config.method.toLowerCase())) {
-    config.headers['x-csrf-token'] = csrf;
+  if (config.method && !['get', 'head', 'options'].includes(config.method.toLowerCase())) {
+    const csrf = getCsrfToken();
+    if (csrf) config.headers['x-csrf-token'] = csrf;
   }
   return config;
 });
@@ -84,7 +89,18 @@ api.interceptors.response.use(
     }
 
     refreshPromise = axios
-      .post(`${API_BASE}/auth/refresh`, {}, { withCredentials: true })
+      .post(
+        `${API_BASE}/auth/refresh`,
+        {},
+        {
+          withCredentials: true,
+          // /refresh authenticates with the refresh cookie, so the gateway and
+          // auth-service require the double-submit header here. This raw axios
+          // call deliberately bypasses the api instance (the 401 came from an
+          // expired bearer token), so the interceptor above cannot add it.
+          headers: csrfHeaders(),
+        }
+      )
       .then(({ data }) => {
         setTokens(data.token);
         return data.token as string;

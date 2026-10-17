@@ -128,16 +128,24 @@ fi
 
 TESTS+=("Token refresh")
 if [ -s "$COOKIE_JAR" ] && grep -q "refreshToken" "$COOKIE_JAR" 2>/dev/null; then
-  REFRESH_RES=$(curl -sf -X POST "$AUTH_URL/refresh" \
-    -H 'Content-Type: application/json' \
-    -b "$COOKIE_JAR" \
-    -c "$COOKIE_JAR") || REFRESH_RES=""
-  NEW_TOKEN=$(echo "$REFRESH_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null) || NEW_TOKEN=""
-  if [ -n "$NEW_TOKEN" ]; then
-    report_pass "Token refresh"
-    TOKEN="$NEW_TOKEN"
+  # /refresh authenticates with the refresh cookie, so the service requires the
+  # double-submit token: the csrf_token cookie echoed in x-csrf-token.
+  CSRF_TOKEN=$(awk '$6 == "csrf_token" { print $7 }' "$COOKIE_JAR" | tail -n 1)
+  if [ -z "$CSRF_TOKEN" ]; then
+    report_fail "Token refresh - login did not set the csrf_token cookie"
   else
-    report_fail "Token refresh"
+    REFRESH_RES=$(curl -sf -X POST "$AUTH_URL/refresh" \
+      -H 'Content-Type: application/json' \
+      -H "x-csrf-token: $CSRF_TOKEN" \
+      -b "$COOKIE_JAR" \
+      -c "$COOKIE_JAR") || REFRESH_RES=""
+    NEW_TOKEN=$(echo "$REFRESH_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null) || NEW_TOKEN=""
+    if [ -n "$NEW_TOKEN" ]; then
+      report_pass "Token refresh"
+      TOKEN="$NEW_TOKEN"
+    else
+      report_fail "Token refresh"
+    fi
   fi
 else
   report_fail "Token refresh — no refresh token cookie"
