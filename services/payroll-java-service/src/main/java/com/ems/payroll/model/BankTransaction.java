@@ -5,7 +5,11 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "bank_transactions")
+@Table(name = "bank_transactions", uniqueConstraints = {
+    // Matches ux_bank_transactions_tenant_reference in V3__bank_transaction_idempotency.sql:
+    // one transfer per tenant and deterministic reference.
+    @UniqueConstraint(name = "ux_bank_transactions_tenant_reference", columnNames = {"tenant_id", "reference"})
+})
 public class BankTransaction {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

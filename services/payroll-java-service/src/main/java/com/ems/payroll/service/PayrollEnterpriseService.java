@@ -5,6 +5,7 @@ import com.ems.payroll.repository.*;
 import com.ems.payroll.util.Money;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -313,16 +314,31 @@ public class PayrollEnterpriseService {
     // 3. PAYROLL FORECASTING
     // ============================================================
 
+    // Forecast heuristics are operational policy, so they come from
+    // configuration; the defaults mirror the values that used to be literals
+    // in generateForecast (3% growth, 25% tax, 8% benefits, 85 confidence).
+    @Value("${payroll.forecast.gross-growth-rate:1.03}")
+    private double forecastGrossGrowthRate = 1.03;
+
+    @Value("${payroll.forecast.tax-rate:0.25}")
+    private double forecastTaxRate = 0.25;
+
+    @Value("${payroll.forecast.benefits-rate:0.08}")
+    private double forecastBenefitsRate = 0.08;
+
+    @Value("${payroll.forecast.confidence:85.0}")
+    private double forecastConfidence = 85.0;
+
     public PayrollForecast generateForecast(String tenantId, String period) {
         BigDecimal totalGross = payrollRepo.sumGrossSalaryByTenant(tenantId);
         if (totalGross == null) totalGross = Money.zero();
         totalGross = Money.of(totalGross);
 
         // Simple forecast: project based on historical trends
-        BigDecimal projectedGross = Money.percentOf(totalGross, 1.03);
-        BigDecimal projectedTax = Money.percentOf(projectedGross, 0.25);
+        BigDecimal projectedGross = Money.percentOf(totalGross, forecastGrossGrowthRate);
+        BigDecimal projectedTax = Money.percentOf(projectedGross, forecastTaxRate);
         BigDecimal projectedNet = Money.subtract(projectedGross, projectedTax);
-        BigDecimal projectedBenefits = Money.percentOf(projectedGross, 0.08);
+        BigDecimal projectedBenefits = Money.percentOf(projectedGross, forecastBenefitsRate);
 
         PayrollForecast forecast = new PayrollForecast();
         forecast.setTenantId(tenantId);
@@ -331,8 +347,9 @@ public class PayrollEnterpriseService {
         forecast.setProjectedNetPayroll(projectedNet);
         forecast.setProjectedTax(projectedTax);
         forecast.setProjectedBenefits(projectedBenefits);
-        forecast.setConfidence(85.0);
-        forecast.setFactors("Based on historical payroll data with 3% growth adjustment");
+        forecast.setConfidence(forecastConfidence);
+        long growthPercent = Math.round((forecastGrossGrowthRate - 1) * 100);
+        forecast.setFactors("Based on historical payroll data with " + growthPercent + "% growth adjustment");
         forecast.setStatus("ACTIVE");
         forecast.setGeneratedAt(LocalDateTime.now());
         forecast.setCreatedAt(LocalDateTime.now());
@@ -409,6 +426,16 @@ public class PayrollEnterpriseService {
     public BankTransaction createBankTransaction(String tenantId, Long payrollId, String employeeId,
                                                   BigDecimal amount, String accountNumber, String routingNumber,
                                                   String bankName) {
+        // Deterministic reference: a retried create for the same payroll line
+        // maps to the same transfer (and the unique index on tenant + reference
+        // is the database-level backstop), instead of silently inserting a
+        // second transfer every time the clock ticks.
+        String reference = payrollDepositReference(payrollId, employeeId);
+        Optional<BankTransaction> existing = bankRepo.findByTenantIdAndReference(tenantId, reference);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+
         BankTransaction tx = new BankTransaction();
         tx.setTenantId(tenantId);
         tx.setPayrollId(payrollId);
@@ -418,15 +445,30 @@ public class PayrollEnterpriseService {
         tx.setRoutingNumber(routingNumber);
         tx.setBankName(bankName);
         tx.setTransactionType("PAYROLL_DIRECT_DEPOSIT");
-        tx.setReference("PAY-" + payrollId + "-" + System.currentTimeMillis());
+        tx.setReference(reference);
         tx.setStatus("PENDING");
         tx.setCreatedAt(LocalDateTime.now());
         return bankRepo.save(tx);
     }
 
-    public BankTransaction processBankTransaction(Long txId) {
-        BankTransaction tx = bankRepo.findById(txId).orElseThrow(
+    private static String payrollDepositReference(Long payrollId, String employeeId) {
+        return "PAY-" + payrollId + "-" + employeeId;
+    }
+
+    @Transactional
+    public BankTransaction processBankTransaction(Long txId, String tenantId) {
+        // Row lock + status guard: the transfer is settled at most once. A
+        // replay returns the already-settled row untouched instead of moving
+        // the money a second time.
+        BankTransaction tx = bankRepo.findByIdAndTenantIdForUpdate(txId, tenantId).orElseThrow(
                 () -> new IllegalArgumentException("Bank transaction not found"));
+        if ("PROCESSED".equals(tx.getStatus())) {
+            return tx;
+        }
+        if (!"PENDING".equals(tx.getStatus())) {
+            throw new IllegalStateException(
+                    "Bank transaction " + txId + " cannot be processed from status " + tx.getStatus());
+        }
         tx.setStatus("PROCESSED");
         tx.setProcessedAt(LocalDateTime.now());
         return bankRepo.save(tx);
@@ -666,6 +708,14 @@ public class PayrollEnterpriseService {
     // 13. PAYROLL COMPLIANCE REPORTS
     // ============================================================
 
+    // Statutory rates used by SOCIAL_SECURITY compliance reports. Externalized
+    // because they change with regulation; defaults are the previous literals.
+    @Value("${payroll.compliance.social-security-rate:0.062}")
+    private double complianceSocialSecurityRate = 0.062;
+
+    @Value("${payroll.compliance.medicare-rate:0.0145}")
+    private double complianceMedicareRate = 0.0145;
+
     public PayrollComplianceReport generateComplianceReport(String tenantId, String reportType, String period, String country) {
         String summary = reportType + " compliance report for " + period;
         StringBuilder details = new StringBuilder();
@@ -685,8 +735,8 @@ public class PayrollEnterpriseService {
         } else if ("SOCIAL_SECURITY".equals(reportType)) {
             BigDecimal totalGross = Money.of(payrollRepo.sumBaseSalaryByTenantAndPeriod(tenantId, period));
             details.append("Total Gross Payroll: ").append(totalGross).append("\n");
-            details.append("Social Security Due: ").append(Money.percentOf(totalGross, 0.062)).append("\n");
-            details.append("Medicare Due: ").append(Money.percentOf(totalGross, 0.0145));
+            details.append("Social Security Due: ").append(Money.percentOf(totalGross, complianceSocialSecurityRate)).append("\n");
+            details.append("Medicare Due: ").append(Money.percentOf(totalGross, complianceMedicareRate));
         } else {
             List<EnhancedPayrollRecord> records = payrollRepo.findByTenantIdAndPeriod(tenantId, period);
             BigDecimal sum = records.stream()
@@ -821,8 +871,8 @@ public class PayrollEnterpriseService {
     private static final int BATCH_SIZE = 500;
 
     public Map<String, Object> runBatchPayroll(String tenantId, String period, List<String> employeeIds,
-                                                BigDecimal baseSalary, BigDecimal allowances, BigDecimal deductions,
-                                                String country, String currency) {
+                                                BigDecimal defaultBaseSalary, BigDecimal defaultAllowances,
+                                                BigDecimal defaultDeductions, String country, String currency) {
         int total = employeeIds.size();
         int processed = 0;
         int failed = 0;
@@ -836,7 +886,10 @@ public class PayrollEnterpriseService {
             try {
                 for (String empId : batch) {
                     try {
-                        runMultiCountryPayroll(tenantId, empId, period, baseSalary, allowances, deductions, country, currency);
+                        SalaryComponents components = resolveComponents(
+                                tenantId, empId, defaultBaseSalary, defaultAllowances, defaultDeductions);
+                        runMultiCountryPayroll(tenantId, empId, period, components.baseSalary(),
+                                components.allowances(), components.deductions(), country, currency);
                         processed++;
                     } catch (Exception e) {
                         failed++;
@@ -857,7 +910,12 @@ public class PayrollEnterpriseService {
                     failures.add(err);
                 }
             }
+        }
 
+        // Progress is recorded only for a clean run: a batch that failed part
+        // way through must not leave a BATCH_PROGRESS row that reads like a
+        // completed payroll.
+        if (failed == 0) {
             updateBatchProgress(tenantId, period, processed, failed, total);
         }
 
@@ -870,6 +928,48 @@ public class PayrollEnterpriseService {
         result.put("durationMs", duration);
         result.put("failures", failures);
         return result;
+    }
+
+    /**
+     * Pay components resolved for one employee of a batch run.
+     */
+    private record SalaryComponents(BigDecimal baseSalary, BigDecimal allowances, BigDecimal deductions) {
+    }
+
+    /**
+     * Resolve the pay components for a single employee. Precedence per field:
+     * the employee's most recent payroll record, then the latest compensation
+     * plan (base salary only), then the batch request values as defaults. The
+     * batch request carries one set of numbers, but stamping them on every
+     * employee pays everyone the same amount even when their real components
+     * differ.
+     */
+    private SalaryComponents resolveComponents(String tenantId, String employeeId,
+                                                BigDecimal defaultBaseSalary, BigDecimal defaultAllowances,
+                                                BigDecimal defaultDeductions) {
+        EnhancedPayrollRecord latestRecord = payrollRepo.findByTenantIdAndEmployeeId(tenantId, employeeId).stream()
+                .max(Comparator.comparing(EnhancedPayrollRecord::getId,
+                        Comparator.nullsFirst(Comparator.naturalOrder())))
+                .orElse(null);
+        CompensationPlan latestPlan = compensationRepo.findByTenantIdAndEmployeeId(tenantId, employeeId).stream()
+                .filter(plan -> plan.getProposedBaseSalary() != null)
+                .max(Comparator.comparing(CompensationPlan::getId,
+                        Comparator.nullsFirst(Comparator.naturalOrder())))
+                .orElse(null);
+
+        BigDecimal baseSalary = latestRecord != null && latestRecord.getBaseSalary() != null
+                ? latestRecord.getBaseSalary()
+                : firstNonNull(latestPlan != null ? latestPlan.getProposedBaseSalary() : null, defaultBaseSalary);
+        BigDecimal allowances = firstNonNull(
+                latestRecord != null ? latestRecord.getAllowances() : null, defaultAllowances);
+        BigDecimal deductions = firstNonNull(
+                latestRecord != null ? latestRecord.getDeductions() : null, defaultDeductions);
+
+        return new SalaryComponents(Money.of(baseSalary), Money.of(allowances), Money.of(deductions));
+    }
+
+    private static BigDecimal firstNonNull(BigDecimal preferred, BigDecimal fallback) {
+        return preferred != null ? preferred : fallback;
     }
 
     private void updateBatchProgress(String tenantId, String period, int processed, int failed, int total) {
@@ -890,31 +990,36 @@ public class PayrollEnterpriseService {
                 .map(EnhancedPayrollRecord::getEmployeeId)
                 .collect(Collectors.toSet());
 
-        // Cross-reference with attendance data via bank transactions as proxy
-        List<BankTransaction> bankTxns = bankRepo.findByTenantId(tenantId);
-        Set<String> attendanceEmployees = bankTxns.stream()
-                .filter(tx -> "PAYROLL_DIRECT_DEPOSIT".equals(tx.getTransactionType()))
+        // Cross-reference the period's payroll against bank deposits for the
+        // same period. The deposit side is filtered through the linked payroll
+        // record: bank_transactions has no period column, and the earlier
+        // version compared one period's payroll against ledger rows from every
+        // period. The check compares payroll against settled deposits, not
+        // attendance - the earlier wording claimed otherwise.
+        List<BankTransaction> depositTxns = bankRepo.findPayrollDepositsByTenantIdAndTypeAndPeriod(
+                tenantId, "PAYROLL_DIRECT_DEPOSIT", period);
+        Set<String> depositedEmployees = depositTxns.stream()
                 .map(BankTransaction::getEmployeeId)
                 .collect(Collectors.toSet());
 
         List<Map<String, Object>> discrepancies = new ArrayList<>();
 
         for (String empId : paidEmployees) {
-            if (!attendanceEmployees.contains(empId)) {
+            if (!depositedEmployees.contains(empId)) {
                 Map<String, Object> d = new LinkedHashMap<>();
-                d.put("type", "PAID_NO_ATTENDANCE");
+                d.put("type", "PAID_NO_BANK_DEPOSIT");
                 d.put("employeeId", empId);
-                d.put("detail", "Employee has payroll record but no attendance data for period " + period);
+                d.put("detail", "Employee has a payroll record but no bank payroll deposit for period " + period);
                 discrepancies.add(d);
             }
         }
 
-        for (String empId : attendanceEmployees) {
+        for (String empId : depositedEmployees) {
             if (!paidEmployees.contains(empId)) {
                 Map<String, Object> d = new LinkedHashMap<>();
-                d.put("type", "ATTENDANCE_NO_PAY");
+                d.put("type", "BANK_DEPOSIT_NO_PAY");
                 d.put("employeeId", empId);
-                d.put("detail", "Employee has attendance data but no payroll record for period " + period);
+                d.put("detail", "Employee has a bank payroll deposit but no payroll record for period " + period);
                 discrepancies.add(d);
             }
         }

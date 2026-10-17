@@ -212,8 +212,10 @@ public class PayrollEnterpriseController {
 
     @RequiresRole({"admin"})
     @PostMapping("/bank/transactions/{id}/process")
-    public ResponseEntity<BankTransaction> processBankTransaction(@PathVariable Long id) {
-        return ResponseEntity.ok(service.processBankTransaction(id));
+    public ResponseEntity<BankTransaction> processBankTransaction(
+            @PathVariable Long id,
+            @TenantId String tenantId) {
+        return ResponseEntity.ok(service.processBankTransaction(id, tenantId));
     }
 
     // ============================================================
