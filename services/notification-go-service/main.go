@@ -152,18 +152,27 @@ func (s *NotificationStore) List(tenantID string) []Notification {
 	return result
 }
 
-func (s *NotificationStore) MarkRead(ids []string) {
+// MarkRead marks the given ids as read only when they belong to tenantID.
+// Ids that do not exist, or exist for another tenant, are left untouched.
+// It returns the number of notifications actually updated.
+func (s *NotificationStore) MarkRead(tenantID string, ids []string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
 	}
+	updated := 0
 	for i := range s.items {
-		if idSet[s.items[i].ID] {
+		if s.items[i].TenantID != tenantID {
+			continue
+		}
+		if idSet[s.items[i].ID] && !s.items[i].Read {
 			s.items[i].Read = true
+			updated++
 		}
 	}
+	return updated
 }
 
 const maxClients = 1000
@@ -477,7 +486,19 @@ func listNotificationsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxMarkReadIDs caps how many ids a single mark-read request may carry, so a
+// hostile caller cannot force unbounded work under the store lock.
+const maxMarkReadIDs = 100
+
 func markReadHandler(w http.ResponseWriter, r *http.Request) {
+	// Read state is tenant data; require the same tenant context the listing
+	// handler requires so ids alone are never sufficient authority.
+	tenantID := r.Header.Get("X-Tenant-Id")
+	if tenantID == "" {
+		http.Error(w, `{"error":"Missing tenant context"}`, http.StatusForbidden)
+		return
+	}
+
 	var req struct {
 		IDs []string `json:"ids"`
 	}
@@ -489,9 +510,23 @@ func markReadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"ids array is required"}`, http.StatusBadRequest)
 		return
 	}
-	store.MarkRead(req.IDs)
+	if len(req.IDs) > maxMarkReadIDs {
+		http.Error(w, `{"error":"too many ids"}`, http.StatusBadRequest)
+		return
+	}
+	for _, id := range req.IDs {
+		if _, err := uuid.Parse(id); err != nil {
+			http.Error(w, `{"error":"invalid id format"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	updated := store.MarkRead(tenantID, req.IDs)
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"updated": updated,
+	}); err != nil {
 		log.Printf("Failed to encode mark-read response")
 	}
 }

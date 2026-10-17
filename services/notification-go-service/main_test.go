@@ -131,7 +131,9 @@ func TestNotificationStore_MarkRead(t *testing.T) {
 	store.Add(Notification{ID: "1", TenantID: "tenant-a", Read: false})
 	store.Add(Notification{ID: "2", TenantID: "tenant-a", Read: false})
 
-	store.MarkRead([]string{"1"})
+	if updated := store.MarkRead("tenant-a", []string{"1"}); updated != 1 {
+		t.Errorf("expected 1 updated notification, got %d", updated)
+	}
 
 	items := store.List("tenant-a")
 	for _, item := range items {
@@ -141,6 +143,18 @@ func TestNotificationStore_MarkRead(t *testing.T) {
 		if item.ID == "2" && item.Read {
 			t.Error("expected item 2 to remain unread")
 		}
+	}
+}
+
+func TestNotificationStore_MarkReadCrossTenant(t *testing.T) {
+	store := &NotificationStore{}
+	store.Add(Notification{ID: "1", TenantID: "tenant-b", Read: false})
+
+	if updated := store.MarkRead("tenant-a", []string{"1"}); updated != 0 {
+		t.Errorf("expected 0 updated notifications for another tenant, got %d", updated)
+	}
+	if items := store.List("tenant-b"); items[0].Read {
+		t.Error("expected another tenant's notification to remain unread")
 	}
 }
 
@@ -218,6 +232,7 @@ func TestListNotificationsHandler_WithTenant(t *testing.T) {
 
 func TestMarkReadHandler_InvalidBody(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString("invalid json"))
+	req.Header.Set("X-Tenant-Id", "tenant-1")
 	w := httptest.NewRecorder()
 	markReadHandler(w, req)
 
@@ -229,6 +244,7 @@ func TestMarkReadHandler_InvalidBody(t *testing.T) {
 func TestMarkReadHandler_EmptyIDs(t *testing.T) {
 	body := `{"ids": []}`
 	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	req.Header.Set("X-Tenant-Id", "tenant-1")
 	w := httptest.NewRecorder()
 	markReadHandler(w, req)
 
@@ -237,9 +253,58 @@ func TestMarkReadHandler_EmptyIDs(t *testing.T) {
 	}
 }
 
+func TestMarkReadHandler_MissingTenant(t *testing.T) {
+	id := "11111111-1111-4111-8111-111111111111"
+	store.Add(Notification{ID: id, TenantID: "tenant-1", Read: false})
+
+	body := `{"ids": ["` + id + `"]}`
+	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	markReadHandler(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+	if itemsByID(t, id).Read {
+		t.Error("expected notification to remain unread without tenant context")
+	}
+}
+
+func TestMarkReadHandler_InvalidIDFormat(t *testing.T) {
+	body := `{"ids": ["not-a-uuid"]}`
+	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	req.Header.Set("X-Tenant-Id", "tenant-1")
+	w := httptest.NewRecorder()
+	markReadHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for malformed id, got %d", w.Code)
+	}
+}
+
+func TestMarkReadHandler_TooManyIDs(t *testing.T) {
+	body := `{"ids": [`
+	for i := 0; i < maxMarkReadIDs+1; i++ {
+		if i > 0 {
+			body += ","
+		}
+		body += `"11111111-1111-4111-8111-111111111111"`
+	}
+	body += `]}`
+	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	req.Header.Set("X-Tenant-Id", "tenant-1")
+	w := httptest.NewRecorder()
+	markReadHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for too many ids, got %d", w.Code)
+	}
+}
+
 func TestMarkReadHandler_Success(t *testing.T) {
+	id := "22222222-2222-4222-8222-222222222222"
 	store.Add(Notification{
-		ID:        "notif-2",
+		ID:        id,
 		Title:     "Test",
 		Message:   "Test message",
 		TenantID:  "tenant-2",
@@ -247,14 +312,83 @@ func TestMarkReadHandler_Success(t *testing.T) {
 		CreatedAt: time.Now().Format(time.RFC3339),
 	})
 
-	body := `{"ids": ["notif-2"]}`
+	body := `{"ids": ["` + id + `"]}`
 	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	req.Header.Set("X-Tenant-Id", "tenant-2")
 	w := httptest.NewRecorder()
 	markReadHandler(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
+	if !itemsByID(t, id).Read {
+		t.Error("expected notification to be marked as read")
+	}
+}
+
+// TestMarkReadHandler_CrossTenantRejected is the regression proof for #349:
+// a caller may not mutate another tenant's read state with a bare id.
+func TestMarkReadHandler_CrossTenantRejected(t *testing.T) {
+	id := "33333333-3333-4333-8333-333333333333"
+	store.Add(Notification{
+		ID:        id,
+		Title:     "Test",
+		Message:   "Test message",
+		TenantID:  "tenant-2",
+		Read:      false,
+		CreatedAt: time.Now().Format(time.RFC3339),
+	})
+
+	body := `{"ids": ["` + id + `"]}`
+	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	req.Header.Set("X-Tenant-Id", "tenant-1")
+	w := httptest.NewRecorder()
+	markReadHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (no-op), got %d", w.Code)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if result["updated"].(float64) != 0 {
+		t.Errorf("expected 0 updated, got %v", result["updated"])
+	}
+	if itemsByID(t, id).Read {
+		t.Error("expected another tenant's notification to remain unread")
+	}
+}
+
+func TestMarkReadHandler_UnknownIDIsNoOp(t *testing.T) {
+	body := `{"ids": ["44444444-4444-4444-8444-444444444444"]}`
+	req := httptest.NewRequest("POST", "/api/notifications", bytes.NewBufferString(body))
+	req.Header.Set("X-Tenant-Id", "tenant-1")
+	w := httptest.NewRecorder()
+	markReadHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if result["updated"].(float64) != 0 {
+		t.Errorf("expected 0 updated for unknown id, got %v", result["updated"])
+	}
+}
+
+// itemsByID finds a stored notification by id for assertions.
+func itemsByID(t *testing.T, id string) Notification {
+	t.Helper()
+	for _, item := range store.List("") {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("notification %s not found in store", id)
+	return Notification{}
 }
 
 func TestInternalAuthMiddleware_NoSecret(t *testing.T) {
@@ -357,7 +491,9 @@ func TestNotificationStore_ListNonExistentTenant(t *testing.T) {
 func TestNotificationStore_MarkReadNonExistent(t *testing.T) {
 	store := &NotificationStore{}
 	store.Add(Notification{ID: "1", TenantID: "tenant-a", Read: false})
-	store.MarkRead([]string{"nonexistent"})
+	if updated := store.MarkRead("tenant-a", []string{"nonexistent"}); updated != 0 {
+		t.Errorf("expected 0 updated for unknown id, got %d", updated)
+	}
 	items := store.List("tenant-a")
 	if len(items) != 1 {
 		t.Errorf("expected 1 item, got %d", len(items))
