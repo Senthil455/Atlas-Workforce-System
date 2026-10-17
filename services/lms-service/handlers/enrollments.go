@@ -78,6 +78,11 @@ func (h *EnrollmentHandler) Enroll(c *fiber.Ctx) error {
 			"error": "course_id and employee_id are required",
 		})
 	}
+	// Enrolling is a manager action (instructor/admin, consistent with the
+	// bulk path) or self-service for the employee the enrollment belongs to.
+	if !middleware.CanManageContent(c) && !middleware.OwnsOrAdmin(c, req.EmployeeID) {
+		return middleware.Forbidden(c)
+	}
 
 	var course models.Course
 	if err := h.DB.Where("id = ? AND tenant_id = ?", req.CourseID, tenantID).First(&course).Error; err != nil {
@@ -134,6 +139,11 @@ func (h *EnrollmentHandler) UpdateProgress(c *fiber.Ctx) error {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to fetch enrollment",
 		})
+	}
+	// State transitions belong to the employee the record is about, or to an
+	// admin acting on their behalf.
+	if !middleware.OwnsOrAdmin(c, enrollment.EmployeeID) {
+		return middleware.Forbidden(c)
 	}
 	if enrollment.Status == "COMPLETED" {
 		return c.Status(http.StatusConflict).JSON(fiber.Map{
@@ -202,6 +212,9 @@ func (h *EnrollmentHandler) Complete(c *fiber.Ctx) error {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to fetch enrollment",
 		})
+	}
+	if !middleware.OwnsOrAdmin(c, enrollment.EmployeeID) {
+		return middleware.Forbidden(c)
 	}
 
 	var req struct {
@@ -311,6 +324,9 @@ func (h *EnrollmentHandler) Drop(c *fiber.Ctx) error {
 			"error": "Failed to fetch enrollment",
 		})
 	}
+	if !middleware.OwnsOrAdmin(c, enrollment.EmployeeID) {
+		return middleware.Forbidden(c)
+	}
 
 	if err := h.DB.Model(&enrollment).Update("status", "DROPPED").Error; err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
@@ -324,6 +340,11 @@ func (h *EnrollmentHandler) Drop(c *fiber.Ctx) error {
 }
 
 func (h *EnrollmentHandler) BulkEnroll(c *fiber.Ctx) error {
+	// Bulk enrollment multiplies impact by the size of the list, so it stays
+	// restricted to the roles that can manage enrollments at all.
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 
 	var req struct {

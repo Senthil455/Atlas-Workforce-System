@@ -107,6 +107,9 @@ func (h *CourseHandler) Get(c *fiber.Ctx) error {
 }
 
 func (h *CourseHandler) Create(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 
 	var req struct {
@@ -182,6 +185,9 @@ func (h *CourseHandler) Create(c *fiber.Ctx) error {
 }
 
 func (h *CourseHandler) Update(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 	id := c.Params("id")
 
@@ -251,6 +257,9 @@ func (h *CourseHandler) Update(c *fiber.Ctx) error {
 }
 
 func (h *CourseHandler) Delete(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 	id := c.Params("id")
 
@@ -315,6 +324,9 @@ func (h *CourseHandler) GetEnrollments(c *fiber.Ctx) error {
 }
 
 func (h *CourseHandler) updateStatus(c *fiber.Ctx, status string) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 	id := c.Params("id")
 

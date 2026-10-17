@@ -57,20 +57,20 @@ func AuthMiddleware() fiber.Handler {
 			return c.Status(401).JSON(fiber.Map{"error": "Token has expired"})
 		}
 
-		userID := claims.UserID
-		userRole := claims.UserRole
-		tenantID := claims.TenantID
-
-		if tenantID == "" {
-			tenantID = "default"
+		// Fail closed: a token without tenant or role claims does not get to
+		// act as a plausible default identity. Missing tenant means the
+		// caller cannot be placed in any tenant (401); a tenant-bound caller
+		// without a role cannot be authorized (403).
+		if claims.TenantID == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing tenant claim"})
 		}
-		if userRole == "" {
-			userRole = "employee"
+		if claims.UserRole == "" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Missing role claim"})
 		}
 
-		c.Locals("user_id", userID)
-		c.Locals("user_role", userRole)
-		c.Locals("tenant_id", tenantID)
+		c.Locals("user_id", claims.UserID)
+		c.Locals("user_role", claims.UserRole)
+		c.Locals("tenant_id", claims.TenantID)
 
 		return c.Next()
 	}

@@ -56,6 +56,9 @@ func (h *AssessmentHandler) List(c *fiber.Ctx) error {
 }
 
 func (h *AssessmentHandler) Create(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 
 	var req struct {
@@ -155,6 +158,9 @@ func (h *AssessmentHandler) Get(c *fiber.Ctx) error {
 }
 
 func (h *AssessmentHandler) Update(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 	id := c.Params("id")
 
@@ -215,6 +221,20 @@ func (h *AssessmentHandler) StartAttempt(c *fiber.Ctx) error {
 	tenantID := middleware.GetTenant(c)
 	assessmentID := c.Params("id")
 
+	var req struct {
+		EmployeeID string `json:"employee_id"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.EmployeeID == "" {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
+			"error": "employee_id is required",
+		})
+	}
+	// Attempts belong to the employee taking them; admins may act on the
+	// employee's behalf. The body identity is validated before any DB work.
+	if !middleware.OwnsOrAdmin(c, req.EmployeeID) {
+		return middleware.Forbidden(c)
+	}
+
 	var assessment models.Assessment
 	if err := h.DB.Where("id = ? AND tenant_id = ?", assessmentID, tenantID).First(&assessment).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -224,15 +244,6 @@ func (h *AssessmentHandler) StartAttempt(c *fiber.Ctx) error {
 		}
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to fetch assessment",
-		})
-	}
-
-	var req struct {
-		EmployeeID string `json:"employee_id"`
-	}
-	if err := c.BodyParser(&req); err != nil || req.EmployeeID == "" {
-		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
-			"error": "employee_id is required",
 		})
 	}
 
@@ -283,18 +294,6 @@ func (h *AssessmentHandler) SubmitAttempt(c *fiber.Ctx) error {
 	tenantID := middleware.GetTenant(c)
 	assessmentID := c.Params("id")
 
-	var assessment models.Assessment
-	if err := h.DB.Where("id = ? AND tenant_id = ?", assessmentID, tenantID).First(&assessment).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return c.Status(http.StatusNotFound).JSON(fiber.Map{
-				"error": "Assessment not found",
-			})
-		}
-		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to fetch assessment",
-		})
-	}
-
 	var req struct {
 		AttemptID  string          `json:"attempt_id"`
 		EmployeeID string          `json:"employee_id"`
@@ -308,6 +307,22 @@ func (h *AssessmentHandler) SubmitAttempt(c *fiber.Ctx) error {
 	if req.AttemptID == "" || req.EmployeeID == "" {
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{
 			"error": "attempt_id and employee_id are required",
+		})
+	}
+	// Only the employee the attempt belongs to (or an admin) may submit it.
+	if !middleware.OwnsOrAdmin(c, req.EmployeeID) {
+		return middleware.Forbidden(c)
+	}
+
+	var assessment models.Assessment
+	if err := h.DB.Where("id = ? AND tenant_id = ?", assessmentID, tenantID).First(&assessment).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return c.Status(http.StatusNotFound).JSON(fiber.Map{
+				"error": "Assessment not found",
+			})
+		}
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to fetch assessment",
 		})
 	}
 

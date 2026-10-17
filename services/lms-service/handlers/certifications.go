@@ -58,6 +58,9 @@ func (h *CertificationHandler) List(c *fiber.Ctx) error {
 }
 
 func (h *CertificationHandler) Create(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 
 	var req struct {
@@ -115,6 +118,9 @@ func (h *CertificationHandler) Create(c *fiber.Ctx) error {
 }
 
 func (h *CertificationHandler) Update(c *fiber.Ctx) error {
+	if !middleware.CanManageContent(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 	id := c.Params("id")
 
@@ -180,6 +186,11 @@ func (h *CertificationHandler) Update(c *fiber.Ctx) error {
 }
 
 func (h *CertificationHandler) Verify(c *fiber.Ctx) error {
+	// Verification is an attestation that a credential is genuine, so it
+	// stays with admins even though instructors can edit certification rows.
+	if !middleware.IsAdmin(c) {
+		return middleware.Forbidden(c)
+	}
 	tenantID := middleware.GetTenant(c)
 	id := c.Params("id")
 
