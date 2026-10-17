@@ -30,6 +30,14 @@ import {
   setTokens,
 } from "./auth";
 import { requiredEnv } from "./env";
+import {
+  API_TIMEOUT_MS,
+  attachRetryInterceptor,
+  redactSensitiveString,
+} from "./api-errors";
+
+export { normalizeApiError } from "./api-errors";
+export type { NormalizedApiError } from "./api-errors";
 
 const API_BASE = requiredEnv(
   "NEXT_PUBLIC_API_URL",
@@ -40,6 +48,9 @@ export const api = axios.create({
   baseURL: API_BASE,
   headers: { "Content-Type": "application/json" },
   withCredentials: true,
+  // Every request is bounded: a hung gateway must not leave UI in a
+  // forever-loading state.
+  timeout: API_TIMEOUT_MS,
 });
 
 function getCsrfToken(): string | null {
@@ -84,17 +95,17 @@ api.interceptors.response.use(
     }
 
     refreshPromise = axios
-      .post(`${API_BASE}/auth/refresh`, {}, { withCredentials: true })
+      .post(`${API_BASE}/auth/refresh`, {}, { withCredentials: true, timeout: API_TIMEOUT_MS })
       .then(({ data }) => {
+        // Fail closed: only accept a non-empty string token. Anything else
+        // (malformed body, HTML error page) is treated as a failed refresh.
+        if (typeof data?.token !== "string" || data.token.length === 0) {
+          return null;
+        }
         setTokens(data.token);
         return data.token as string;
       })
       .catch(() => {
-        clearAuth();
-        if (typeof window !== "undefined") {
-          const currentPath = window.location.pathname + window.location.search;
-          window.location.href = "/login?redirect=" + encodeURIComponent(currentPath);
-        }
         return null;
       })
       .finally(() => {
@@ -102,16 +113,36 @@ api.interceptors.response.use(
       });
 
     const token = await refreshPromise;
-    if (!token) return Promise.reject(error);
+    if (!token) {
+      clearAuth();
+      if (typeof window !== "undefined") {
+        const currentPath = window.location.pathname + window.location.search;
+        window.location.href = "/login?redirect=" + encodeURIComponent(currentPath);
+      }
+      return Promise.reject(error);
+    }
     original.headers.Authorization = `Bearer ${token}`;
     return api(original);
   }
 );
 
+// Bounded, idempotent-only retries with full jitter. Registered after the
+// auth-refresh interceptor so a 401 is resolved (or the session is cleared)
+// before any retry decision is made.
+attachRetryInterceptor(api);
+
 function validateResponse<T>(schema: z.ZodType<T>, data: unknown, resource = "API"): T {
   const result = schema.safeParse(data);
   if (!result.success) {
-    console.error(`${resource} response validation failed:`, result.error.issues);
+    // Log paths and codes only: zod issues can echo submitted values, which
+    // must never end up in client-side logs or error trackers.
+    const issues = result.error.issues.map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join(".") : "(root)";
+      return `${path}: ${issue.code}`;
+    });
+    console.error(
+      redactSensitiveString(`${resource} response validation failed: ${issues.join(", ")}`)
+    );
     throw new Error(`Invalid ${resource} response format`);
   }
   return data as T;
