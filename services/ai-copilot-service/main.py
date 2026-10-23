@@ -3,12 +3,13 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from atlas_observability import (
     AtlasLoggingMiddleware, AtlasMetricsMiddleware, CorrelationIdMiddleware,
     SecurityHeadersMiddleware,
-    configure_logging, get_logger, verify_internal_auth
+    configure_logging, get_correlation_id, get_logger, verify_internal_auth
 )
 
 from models import SessionStore
@@ -136,6 +137,28 @@ async def internal_auth_middleware(request: Request, call_next):
         return JSONResponse(status_code=401, content={"error": "Invalid internal authentication"})
 
     return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Pydantic errors carry the raw "input"; drop it so oversized or sensitive
+    # payloads are never echoed back to the client or written to logs.
+    correlation_id = (get_correlation_id() or "-")[:36]
+    detail = []
+    for err in exc.errors():
+        value = err.get("input")
+        size = len(value) if isinstance(value, (str, list, dict)) else None
+        logger.warning(
+            "request.validation_rejected path=%s correlation_id=%s field=%s type=%s size=%s",
+            request.url.path, correlation_id, ".".join(str(p) for p in err.get("loc", ())),
+            err.get("type"), size,
+        )
+        item = {"type": err.get("type"), "loc": list(err.get("loc", ())), "msg": err.get("msg")}
+        ctx = {k: v for k, v in (err.get("ctx") or {}).items() if isinstance(v, (int, float))}
+        if ctx:
+            item["ctx"] = ctx
+        detail.append(item)
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 # ──────────────────────────────────────────────

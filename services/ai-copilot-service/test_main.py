@@ -418,3 +418,127 @@ def test_resume_parser_ongoing_variants_use_utc_year():
         entries = extract_experience(f"Lead at Globex 2019-{marker}")
         assert entries, marker
         assert entries[0]["years"] == current - 2019
+
+
+# ──────────────────────────────────────────────
+#  Input size limits (#662)
+# ──────────────────────────────────────────────
+
+from schemas import (
+    MAX_CHAT_MESSAGE_CHARS, MAX_JOB_DESCRIPTION_CHARS, MAX_JOB_REQUIREMENT_CHARS,
+    MAX_JOB_REQUIREMENTS, MAX_RESUME_TEXT_CHARS,
+)
+
+_SCORE_STUB = {
+    "overall_score": 0.5, "skill_match": 0.5, "experience_match": 0.5, "education_match": 0.5,
+    "matched_skills": [], "missing_skills": [], "summary": "stub",
+}
+_ANALYZE_STUB = {"skills": [], "experience": [], "education": []}
+
+
+@pytest.fixture
+def stub_resume(monkeypatch):
+    import main
+    monkeypatch.setattr(main, "score_resume", lambda *a, **k: _SCORE_STUB)
+    monkeypatch.setattr(main, "parse_resume", lambda *a, **k: _ANALYZE_STUB)
+
+
+def _error_locs(resp):
+    return [e["loc"] for e in resp.json()["detail"]]
+
+
+@pytest.mark.asyncio
+async def test_chat_message_at_limit_accepted(client):
+    resp = await client.post("/api/v1/copilot/chat", json={"message": "a" * MAX_CHAT_MESSAGE_CHARS})
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_chat_message_one_over_limit_rejected(client):
+    resp = await client.post("/api/v1/copilot/chat", json={"message": "a" * (MAX_CHAT_MESSAGE_CHARS + 1)})
+    assert resp.status_code == 422
+    assert ["body", "message"] in _error_locs(resp)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["", "   ", " \n\t "])
+async def test_chat_message_empty_or_blank_rejected(client, message):
+    resp = await client.post("/api/v1/copilot/chat", json={"message": message})
+    assert resp.status_code == 422
+    assert ["body", "message"] in _error_locs(resp)
+
+
+@pytest.mark.asyncio
+async def test_chat_message_multibyte_counted_by_code_point(client):
+    # Each emoji is 4 bytes in UTF-8; the limit is on characters, not bytes.
+    at_limit = await client.post("/api/v1/copilot/chat", json={"message": "😀" * MAX_CHAT_MESSAGE_CHARS})
+    assert at_limit.status_code == 200
+    over = await client.post("/api/v1/copilot/chat", json={"message": "😀" * (MAX_CHAT_MESSAGE_CHARS + 1)})
+    assert over.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_resume_score_boundaries(client, stub_resume):
+    base = {"resume_text": "Python developer", "job_description": "Python role"}
+    ok = await client.post("/api/v1/resume/score", json={
+        "resume_text": "r" * MAX_RESUME_TEXT_CHARS,
+        "job_description": "j" * MAX_JOB_DESCRIPTION_CHARS,
+        "job_requirements": ["q" * MAX_JOB_REQUIREMENT_CHARS] * MAX_JOB_REQUIREMENTS,
+    })
+    assert ok.status_code == 200
+
+    cases = [
+        ({"resume_text": "r" * (MAX_RESUME_TEXT_CHARS + 1)}, ["body", "resume_text"]),
+        ({"job_description": "j" * (MAX_JOB_DESCRIPTION_CHARS + 1)}, ["body", "job_description"]),
+        ({"job_requirements": ["Python"] * (MAX_JOB_REQUIREMENTS + 1)}, ["body", "job_requirements"]),
+        ({"job_requirements": ["q" * (MAX_JOB_REQUIREMENT_CHARS + 1)]}, ["body", "job_requirements", 0]),
+    ]
+    for override, loc in cases:
+        resp = await client.post("/api/v1/resume/score", json={**base, **override})
+        assert resp.status_code == 422, loc
+        assert loc in _error_locs(resp)
+
+
+@pytest.mark.asyncio
+async def test_resume_analyze_boundaries_multibyte(client, stub_resume):
+    ok = await client.post("/api/v1/resume/analyze", json={"resume_text": "漢" * MAX_RESUME_TEXT_CHARS})
+    assert ok.status_code == 200
+    over = await client.post("/api/v1/resume/analyze", json={"resume_text": "漢" * (MAX_RESUME_TEXT_CHARS + 1)})
+    assert over.status_code == 422
+    assert ["body", "resume_text"] in _error_locs(over)
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_rejected_before_model_call(client, monkeypatch):
+    import main
+    calls = []
+
+    async def fake_chat(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("model must not be called")
+
+    monkeypatch.setattr(main, "handle_chat_message", fake_chat)
+    monkeypatch.setattr(main, "score_resume", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(main, "parse_resume", lambda *a, **k: calls.append(a))
+
+    big = "x" * 900_000
+    assert (await client.post("/api/v1/copilot/chat", json={"message": big})).status_code == 422
+    assert (await client.post("/api/v1/resume/score", json={
+        "resume_text": big, "job_description": "Python role"})).status_code == 422
+    assert (await client.post("/api/v1/resume/analyze", json={"resume_text": big})).status_code == 422
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_validation_error_does_not_echo_or_log_input(client, caplog):
+    marker = "SECRET-PROMPT-CONTENT-"
+    payload = marker * (MAX_CHAT_MESSAGE_CHARS // len(marker) + 1)
+    with caplog.at_level("WARNING"):
+        resp = await client.post("/api/v1/copilot/chat", json={"message": payload})
+    assert resp.status_code == 422
+    assert marker not in resp.text
+    assert all("input" not in e for e in resp.json()["detail"])
+    assert len(resp.content) < 1_000
+    assert "request.validation_rejected" in caplog.text
+    assert f"size={len(payload)}" in caplog.text
+    assert marker not in caplog.text

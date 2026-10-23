@@ -1,5 +1,13 @@
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import Annotated, Optional
+
+# Per-field input limits, counted in Unicode code points (Python len()), not bytes.
+# Enforced at the schema layer so oversized input is rejected with 422 before any model call.
+MAX_CHAT_MESSAGE_CHARS = 8_000
+MAX_RESUME_TEXT_CHARS = 50_000
+MAX_JOB_DESCRIPTION_CHARS = 20_000
+MAX_JOB_REQUIREMENTS = 50
+MAX_JOB_REQUIREMENT_CHARS = 200
 
 # ──────────────────────────────────────────────
 #  Copilot / Chat
@@ -11,9 +19,16 @@ class ChatContext(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=4000)
+    message: str = Field(..., min_length=1, max_length=MAX_CHAT_MESSAGE_CHARS)
     session_id: Optional[str] = None
     context: Optional[ChatContext] = None
+
+    @field_validator("message")
+    @classmethod
+    def _reject_blank_message(cls, v):
+        if not v.strip():
+            raise ValueError("message must not be blank")
+        return v
 
 
 class SuggestedAction(BaseModel):
@@ -152,9 +167,11 @@ class DepartmentGrowthResponse(BaseModel):
 # ──────────────────────────────────────────────
 
 class ResumeScoreRequest(BaseModel):
-    resume_text: str = Field(..., min_length=10)
-    job_description: str = Field(..., min_length=10)
-    job_requirements: list[str] = Field(default_factory=list)
+    resume_text: str = Field(..., min_length=10, max_length=MAX_RESUME_TEXT_CHARS)
+    job_description: str = Field(..., min_length=10, max_length=MAX_JOB_DESCRIPTION_CHARS)
+    job_requirements: list[Annotated[str, Field(max_length=MAX_JOB_REQUIREMENT_CHARS)]] = Field(
+        default_factory=list, max_length=MAX_JOB_REQUIREMENTS
+    )
 
 
 class ResumeScoreResponse(BaseModel):
@@ -168,7 +185,7 @@ class ResumeScoreResponse(BaseModel):
 
 
 class ResumeAnalyzeRequest(BaseModel):
-    resume_text: str = Field(..., min_length=10)
+    resume_text: str = Field(..., min_length=10, max_length=MAX_RESUME_TEXT_CHARS)
 
 
 class ExperienceEntry(BaseModel):
