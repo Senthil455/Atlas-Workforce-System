@@ -77,6 +77,7 @@ app.use(helmet());
 app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 
+const NODE_ENV = process.env.NODE_ENV || 'production';
 const allowedOriginsEnv = process.env.ALLOWED_ORIGINS;
 if (!allowedOriginsEnv || !allowedOriginsEnv.trim()) {
   console.error('FATAL: ALLOWED_ORIGINS environment variable is required (comma-separated, no localhost fallback)');
@@ -137,7 +138,6 @@ const globalRateLimiter = rateLimit({
 app.use(globalRateLimiter);
 
 const PORT = process.env.PORT || 8010;
-const NODE_ENV = process.env.NODE_ENV || 'production';
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD;
 const ACCESS_EXPIRY = '15m';
@@ -1115,13 +1115,13 @@ function signMfaChallengeToken(user) {
   );
 }
 
-async function createRefreshToken(userId) {
+async function createRefreshToken(userId, db = pool) {
   const token = crypto.randomBytes(48).toString('hex');
   const tokenHash = hashToken(token);
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + REFRESH_EXPIRY_DAYS);
 
-  await pool.query(
+  await db.query(
     'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
     [userId, tokenHash, expiresAt]
   );
@@ -1129,32 +1129,115 @@ async function createRefreshToken(userId) {
   return token;
 }
 
-async function revokeRefreshToken(refreshToken) {
-  if (!refreshToken) return;
-  const tokenHash = hashToken(refreshToken);
-  await pool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [tokenHash]);
+async function revokeAllUserSessions(userId, db = pool) {
+  await db.query('UPDATE sessions SET is_active = false WHERE user_id = $1', [userId]);
+  await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
 }
 
-async function verifyRefreshToken(refreshToken) {
-  const tokenHash = hashToken(refreshToken);
-  const result = await pool.query(
-    `SELECT rt.*, u.id, u.email, u.name, u.role, u.department, u.position, u.tenant_id
-     FROM refresh_tokens rt
-     JOIN users u ON u.id = rt.user_id
-     LEFT JOIN sessions s ON s.token_hash = rt.token_hash AND s.user_id = rt.user_id
-     WHERE rt.token_hash = $1 AND rt.expires_at > NOW() AND (s.is_active IS NULL OR s.is_active = true)`,
+// A refresh token that is no longer live but still sits in rotated_tokens was
+// presented after it had been rotated: treat it as stolen and revoke every
+// session of its owner. The DELETE ... RETURNING claims the record, so two
+// replays racing each other trigger the revocation once.
+async function revokeOnRotatedTokenReuse(db, tokenHash) {
+  const rotated = await db.query(
+    'DELETE FROM rotated_tokens WHERE token_hash = $1 RETURNING user_id',
     [tokenHash]
   );
-  if (!result.rows[0]) return null;
-  // Also check if the session for this token is explicitly revoked
-  const sessCheck = await pool.query('SELECT is_active FROM sessions WHERE token_hash = $1 AND user_id = $2', [tokenHash, result.rows[0].id]);
-  if (sessCheck.rows[0] && sessCheck.rows[0].is_active === false) return null;
-  return result.rows[0];
+  if (!rotated.rows[0]) return null;
+  const userId = rotated.rows[0].user_id;
+  await revokeAllUserSessions(userId, db);
+  return userId;
 }
 
-async function revokeAllUserSessions(userId) {
-  await pool.query('UPDATE sessions SET is_active = false WHERE user_id = $1', [userId]);
-  await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
+// Rotate a refresh token. The old token is claimed with a single
+// DELETE ... RETURNING, so of two requests presenting the same token only one
+// gets the row back; the other blocks on the row lock until the winner
+// commits, sees zero rows, and is handled as reuse. The rotated_tokens record,
+// the replacement token and the session update commit in the same
+// transaction, so the loser always finds the rotation it lost to.
+async function rotateRefreshToken(db, refreshToken) {
+  const oldTokenHash = hashToken(refreshToken);
+  const client = await db.connect();
+  let result = null;
+  try {
+    await client.query('BEGIN');
+    const claimed = await client.query(
+      'DELETE FROM refresh_tokens WHERE token_hash = $1 AND expires_at > NOW() RETURNING user_id',
+      [oldTokenHash]
+    );
+    const userId = claimed.rows[0]?.user_id;
+    if (userId !== undefined) {
+      const sessRes = await client.query(
+        'SELECT id, is_active FROM sessions WHERE token_hash = $1 AND user_id = $2 FOR UPDATE',
+        [oldTokenHash, userId]
+      );
+      const session = sessRes.rows[0];
+      const userRes = await client.query(
+        'SELECT id, email, name, role, department, position, tenant_id FROM users WHERE id = $1',
+        [userId]
+      );
+      const user = userRes.rows[0];
+      if (user && !(session && session.is_active === false)) {
+        await client.query(
+          'INSERT INTO rotated_tokens (token_hash, user_id) VALUES ($1, $2)',
+          [oldTokenHash, userId]
+        );
+        const newRefreshToken = await createRefreshToken(userId, client);
+        if (session) {
+          await client.query('UPDATE sessions SET token_hash = $1 WHERE id = $2', [hashToken(newRefreshToken), session.id]);
+        }
+        result = { status: 'ok', user, sessionId: session?.id || null, newRefreshToken };
+      }
+    }
+    // Anything short of a full rotation leaves the stored token untouched.
+    await client.query(result ? 'COMMIT' : 'ROLLBACK');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  if (result) {
+    await db.query("DELETE FROM rotated_tokens WHERE created_at < NOW() - INTERVAL '1 hour'");
+    return result;
+  }
+  const reusedBy = await revokeOnRotatedTokenReuse(db, oldTokenHash);
+  return reusedBy === null ? { status: 'invalid' } : { status: 'reused', userId: reusedBy };
+}
+
+// Revoke the refresh token presented at logout and deactivate its session.
+// Claimed the same way as rotateRefreshToken, so a logout racing a refresh
+// cannot miss the session: if the refresh won, the token is found in
+// rotated_tokens and handled as reuse, which revokes every session.
+async function revokeRefreshTokenForLogout(db, refreshToken) {
+  const tokenHash = hashToken(refreshToken);
+  const client = await db.connect();
+  let userId;
+  try {
+    await client.query('BEGIN');
+    const claimed = await client.query(
+      'DELETE FROM refresh_tokens WHERE token_hash = $1 RETURNING user_id',
+      [tokenHash]
+    );
+    userId = claimed.rows[0]?.user_id;
+    if (userId !== undefined) {
+      await client.query(
+        'UPDATE sessions SET is_active = false WHERE token_hash = $1 AND user_id = $2',
+        [tokenHash, userId]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  if (userId !== undefined) return { status: 'revoked', userId };
+  const reusedBy = await revokeOnRotatedTokenReuse(db, tokenHash);
+  return reusedBy === null ? { status: 'none' } : { status: 'reused', userId: reusedBy };
 }
 
 function normalizeFailedAttemptEmail(email) {
@@ -2171,46 +2254,24 @@ app.post('/refresh', createUserRateLimiter('refresh', 100), requireCsrfDoubleSub
   }
 
   try {
-    const row = await verifyRefreshToken(refreshToken);
-    if (!row) {
-      const tokenHash = hashToken(refreshToken);
-      const rotatedCheck = await pool.query(
-        'SELECT user_id FROM rotated_tokens WHERE token_hash = $1',
-        [tokenHash]
-      );
-      if (rotatedCheck.rows[0]) {
-        const userId = rotatedCheck.rows[0].user_id;
-        await revokeAllUserSessions(userId);
-        await pool.query('DELETE FROM rotated_tokens WHERE token_hash = $1', [tokenHash]);
-        await sendAuditEvent('auth.refresh_token_reuse', userId, null, { action: 'all_sessions_revoked' });
-        return res.status(401).json({ message: 'Token reuse detected. All sessions revoked.' });
-      }
+    const rotation = await rotateRefreshToken(pool, refreshToken);
+    if (rotation.status === 'reused') {
+      await sendAuditEvent('auth.refresh_token_reuse', rotation.userId, null, { action: 'all_sessions_revoked' });
+      return res.status(401).json({ message: 'Token reuse detected. All sessions revoked.' });
+    }
+    if (rotation.status !== 'ok') {
       return res.status(401).json({ message: 'Invalid or expired refresh token' });
     }
 
-    const oldTokenHash = hashToken(refreshToken);
-    await pool.query(
-      'INSERT INTO rotated_tokens (token_hash, user_id) VALUES ($1, $2)',
-      [oldTokenHash, row.id]
-    );
-    await pool.query("DELETE FROM rotated_tokens WHERE created_at < NOW() - INTERVAL '1 hour'");
-
-    await revokeRefreshToken(refreshToken);
-
+    const row = rotation.user;
     const user = {
       id: row.id,
       email: row.email,
       role: row.role,
       tenant_id: row.tenant_id,
     };
-    // Find the session that holds this refresh token and rotate its token_hash
-    const sessRes = await pool.query('SELECT id FROM sessions WHERE token_hash = $1 AND user_id = $2', [oldTokenHash, row.id]);
-    const sessionId = sessRes.rows[0]?.id || null;
-    const token = signAccessToken(user, sessionId);
-    const newRefreshToken = await createRefreshToken(row.user_id);
-    if (sessionId) {
-      await pool.query('UPDATE sessions SET token_hash = $1 WHERE id = $2', [hashToken(newRefreshToken), sessionId]);
-    }
+    const token = signAccessToken(user, rotation.sessionId);
+    const newRefreshToken = rotation.newRefreshToken;
 
     res.cookie('refreshToken', newRefreshToken, {
       httpOnly: true,
@@ -2239,18 +2300,19 @@ app.post('/logout', createUserRateLimiter('logout', 100), requireCsrfDoubleSubmi
 
   try {
     if (refreshToken) {
-      const row = await verifyRefreshToken(refreshToken);
-      if (row) {
-        userId = row.id;
-        userEmail = row.email;
+      const revocation = await revokeRefreshTokenForLogout(pool, refreshToken);
+      if (revocation.status === 'reused') {
+        await sendAuditEvent('auth.refresh_token_reuse', revocation.userId, null, { action: 'all_sessions_revoked', source: 'logout' });
       }
-      await revokeRefreshToken(refreshToken);
+      if (revocation.status !== 'none') {
+        userId = revocation.userId;
+        const userRes = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+        userEmail = userRes.rows[0]?.email || null;
+      }
     }
 
     if (sessionId) {
       await pool.query('UPDATE sessions SET is_active = false WHERE id = $1', [sessionId]);
-    } else if (refreshToken) {
-      await pool.query('UPDATE sessions SET is_active = false WHERE token_hash = $1', [hashToken(refreshToken)]);
     }
 
     // Denylist the access token and session so they cannot be used for the
@@ -4902,6 +4964,8 @@ module.exports = {
   PASSWORD_HISTORY_MAX_RETENTION,
   COMMON_PASSWORD_LIST_VERSION,
   hashToken,
+  rotateRefreshToken,
+  revokeRefreshTokenForLogout,
   sanitizeUser,
   resolveOktaBaseUrl,
   generateSamlRequestId,
