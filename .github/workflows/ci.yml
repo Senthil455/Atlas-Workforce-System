@@ -213,7 +213,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.21"
+          # lms-service and notification-go-service declare go >= 1.25/1.26;
+          # an older toolchain refuses to build them before gosec runs.
+          go-version: "1.26"
       - name: Install dependencies
         run: go mod download
         working-directory: services/${{ matrix.service }}

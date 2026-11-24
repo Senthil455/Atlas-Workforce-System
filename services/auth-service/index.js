@@ -72,8 +72,9 @@ app.use(helmet());
 // when it is missing. Requests that authenticate with a Bearer header are
 // exempt because browsers never attach that header cross-site; every other
 // state-changing route authenticates with Bearer JWTs, which are immune to
-// CSRF. All cookies are SameSite=strict.
-// codeql[js/missing-token-validation]
+// CSRF. All cookies are SameSite=strict. A global middleware below mints the
+// readable csrf_token cookie and enforces the double submit on the
+// cookie-authenticated session routes.
 app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 
@@ -104,6 +105,11 @@ app.use(
     credentials: true,
   })
 );
+
+// Global CSRF protection. The cookie-authenticated session routes are guarded
+// by csrfProtection before their handlers run; it mints the readable csrf_token
+// cookie when it is missing and enforces the double submit.
+app.use(csrfProtection);
 
 function metricsMiddleware(req, res, next) {
   if (req.path === '/metrics' || req.path === '/health') {
@@ -870,13 +876,26 @@ const DEFAULT_PASSWORD_POLICY = Object.freeze({
   max_age_days: null,
 });
 
+// Trailing digits/punctuation accepted after a common base word, e.g.
+// "qwerty" -> "qwerty2026!". Trimmed with a linear scan: the equivalent
+// unanchored regex backtracks polynomially on long non-matching input.
+const COMMON_PASSWORD_SUFFIX_CHARS = '0123456789!@#$%^&*._-';
+
+function stripCommonPasswordSuffix(value) {
+  let end = value.length;
+  while (end > 0 && COMMON_PASSWORD_SUFFIX_CHARS.includes(value[end - 1])) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
 function isCommonPassword(password) {
   if (!password || typeof password !== 'string') return false;
   const candidate = password.trim().toLowerCase();
   if (COMMON_PASSWORDS.has(candidate)) return true;
   // Also reject a listed base word with trailing digits/punctuation appended,
   // e.g. "qwerty" -> "qwerty2026!" - the cheapest way of "changing" a password.
-  const stripped = candidate.replace(/[0-9!@#$%^&*._\-]+$/, '');
+  const stripped = stripCommonPasswordSuffix(candidate);
   return stripped.length >= 6 && COMMON_PASSWORDS.has(stripped);
 }
 
@@ -1419,6 +1438,29 @@ async function requireScimAuth(req, res, next) {
 }
 
 const rateLimitStore = new Map();
+
+// Routes that authenticate with the refreshToken cookie instead of a Bearer
+// header; these are the requests that need a CSRF token.
+const CSRF_COOKIE_AUTH_ROUTES = new Set(['/refresh', '/logout']);
+const CSRF_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function csrfProtection(req, res, next) {
+  if (!CSRF_COOKIE_AUTH_ROUTES.has(req.path)) {
+    return next();
+  }
+  if (!req.cookies?.csrf_token) {
+    res.cookie('csrf_token', crypto.randomBytes(32).toString('hex'), {
+      httpOnly: false,
+      secure: NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: REFRESH_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+    });
+  }
+  if (CSRF_SAFE_METHODS.has(req.method)) {
+    return next();
+  }
+  return requireCsrfDoubleSubmit(req, res, next);
+}
 
 // Double-submit CSRF protection for cookie-authenticated routes (/refresh,
 // /logout), mirroring the api-gateway policy. The rule keys on how the request

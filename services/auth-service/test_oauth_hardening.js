@@ -164,7 +164,7 @@ function testCacheTtl() {
 
 function testDiscoveryUrls() {
   assert.strictEqual(oidcDiscoveryUrlFor('google', null), DISCOVERY_URL);
-  assert.ok(oidcDiscoveryUrlFor('microsoft', null).includes('login.microsoftonline.com'));
+  assert.strictEqual(new URL(oidcDiscoveryUrlFor('microsoft', null)).hostname, 'login.microsoftonline.com');
   assert.strictEqual(oidcDiscoveryUrlFor('okta', 'https://acme.okta.com'), 'https://acme.okta.com/.well-known/openid-configuration');
   assert.strictEqual(oidcDiscoveryUrlFor('okta', null), null, 'okta without a valid base fails closed');
   assert.strictEqual(oidcDiscoveryUrlFor('github', null), null, 'github is plain OAuth2 with no discovery');

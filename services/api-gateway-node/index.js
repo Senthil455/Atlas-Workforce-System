@@ -1487,7 +1487,7 @@ async function resolveSlackAtlasIdentity(slackUserId, teamId) {
   } catch (err) {
     const status = err.response?.status;
     if (status !== 404) {
-      console.error(`Atlas identity lookup failed for Slack user ${slackUserId}:`, err.message);
+      console.error('Atlas identity lookup failed for Slack user %s:', slackUserId, err.message);
     }
     return null;
   }

@@ -506,7 +506,7 @@ def build_internal_service_headers(tenant_id, audience):
             tenant_id=tenant_id, audience=audience, ttl_seconds=60,
         )
     except ValueError:
-        logger.error("analytics.internal_service_auth_not_configured", extra={"audience": audience})
+        logger.error("analytics.internal_service_auth_not_configured")
         raise HTTPException(
             status_code=502,
             detail="Internal service unavailable (internal auth not configured)",
@@ -568,7 +568,8 @@ def fetch_tenant_employees(tenant_id):
         page += 1
     else:
         logger.warning("analytics.department_pagination_cap_reached",
-                       extra={"tenant_id": tenant_id, "max_pages": EMPLOYEE_MAX_PAGES})
+                       extra={"tenant_fp": hashlib.sha256(str(tenant_id).encode()).hexdigest()[:16],
+                              "max_pages": EMPLOYEE_MAX_PAGES})
     return items
 
 

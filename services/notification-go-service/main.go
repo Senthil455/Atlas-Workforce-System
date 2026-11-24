@@ -29,7 +29,7 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return time.Duration(n) * time.Second
 		}
-		log.Printf("Warning: invalid %s %q, using %s", key, v, fallback)
+		log.Printf("Warning: invalid %s %q, using %s", sanitizeLogArg(key), sanitizeLogArg(v), fallback)
 	}
 	return fallback
 }
@@ -421,7 +421,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		clientIP = host
 	} else {
-		log.Printf("Warning: could not split host/port from %q: %v", r.RemoteAddr, err)
+		log.Printf("Warning: could not split host/port from %q: %v", sanitizeLogArg(r.RemoteAddr), err)
 		clientIP = r.RemoteAddr
 	}
 
