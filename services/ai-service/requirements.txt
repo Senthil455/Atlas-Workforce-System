@@ -1,8 +1,8 @@
 typing_extensions>=4.8.0
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.5
-pydantic-settings==2.7.1
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+pydantic-settings==2.16.3
 python-dotenv==1.2.4
 openai==1.58.1
 scikit-learn==1.9.1
@@ -10,5 +10,10 @@ numpy==2.2.2
 pandas==2.2.3
 textblob==0.18.0
 aio-pika==9.5.3
-sse-starlette==2.2.1
+sse-starlette==3.7.1
+nltk==3.10.4
+anyio==4.16.0
+certifi==2026.11.20
+idna==3.20
+tqdm==4.70.1
 -e ../atlas_observability

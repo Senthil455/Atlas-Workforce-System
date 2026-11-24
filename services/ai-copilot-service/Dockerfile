@@ -1,5 +1,5 @@
 # ── Builder stage ──────────────────────────────
-FROM python:3.10-slim AS builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
@@ -8,13 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY services/atlas_observability/ ./services/atlas_observability/
-RUN pip install -e ./services/atlas_observability
+RUN pip install --no-cache-dir -e ./services/atlas_observability
 COPY services/ai-copilot-service/requirements.txt .
 RUN grep -v "atlas_observability" requirements.txt > req_clean.txt && \
     pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r req_clean.txt
 
 # ── Runtime stage ─────────────────────────────
-FROM python:3.10-slim AS runtime
+FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir /wheels/*
 
 # Copy observability package source and install
 COPY --from=builder /app/services/atlas_observability /app/services/atlas_observability
-RUN pip install -e ./services/atlas_observability
+RUN pip install --no-cache-dir -e ./services/atlas_observability
 
 # Copy application code
 COPY services/ai-copilot-service/ .
@@ -42,5 +42,6 @@ RUN chown -R appuser:appgroup /app
 USER appuser
 
 EXPOSE 8015
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8015/health', timeout=4).status == 200 else 1)"
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8015"]

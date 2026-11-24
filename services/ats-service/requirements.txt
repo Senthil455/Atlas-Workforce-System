@@ -1,12 +1,16 @@
 typing_extensions>=4.8.0
-fastapi==0.104.1
-uvicorn==0.24.0.post1
+fastapi==0.165.0
+uvicorn==0.54.0
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
-pydantic==2.5.2
+pydantic==2.14.4
 python-dotenv==1.2.4
 alembic==1.13.0
-httpx==0.25.2
+httpx==0.28.1
+pygments==2.21.0
+anyio==4.16.0
+certifi==2026.11.20
+idna==3.20
 pytest==9.1.1
 pytest-asyncio==1.4.0
 -e ../atlas_observability

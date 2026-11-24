@@ -440,7 +440,7 @@ function decryptOAuthSecret(ciphertextB64) {
     const iv = data.subarray(0, 12);
     const tag = data.subarray(12, 28);
     const encrypted = data.subarray(28);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
     decipher.setAuthTag(tag);
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
     return decrypted.toString('utf8');

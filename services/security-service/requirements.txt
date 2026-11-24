@@ -1,13 +1,17 @@
 typing_extensions>=4.8.0
-fastapi==0.115.0
-uvicorn==0.30.6
+fastapi==0.165.0
+uvicorn==0.54.0
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
-pydantic==2.9.2
-pydantic-settings==2.5.2
+pydantic==2.14.4
+pydantic-settings==2.16.3
 python-dotenv==1.2.4
 cryptography==50.0.0
 pyjwt==2.15.0
 passlib==1.7.4
 python-multipart==0.0.31
+h11==0.16.0
+anyio==4.16.0
+certifi==2026.11.20
+idna==3.20
 -e ../atlas_observability

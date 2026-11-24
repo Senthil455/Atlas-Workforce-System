@@ -38,6 +38,7 @@ import stat
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -199,6 +200,13 @@ def _active_grants(vault, now=None):
     return [grant for grant in _load_grants(vault, now) if grant["state"] == "active"]
 
 
+def _safe_webhook(url):
+    """Only https webhooks are allowed, so the alert path cannot be coerced
+    into file:// or another non-HTTP scheme from the environment."""
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
 def _emit_alerts(vault, metadata, event, grant, dry_run=False):
     """Queue one alert per admin plus the audit channel, then try the webhook."""
     recipients = [
@@ -222,6 +230,10 @@ def _emit_alerts(vault, metadata, event, grant, dry_run=False):
                 handle.write(json.dumps(alert, sort_keys=True) + "\n")
         queued.append(alert)
     webhook = os.environ.get(WEBHOOK_ENV_VAR, "").strip()
+    if webhook and not dry_run and not _safe_webhook(webhook):
+        print("WARNING: refusing break-glass webhook that is not an https URL; "
+              "alerts remain queued in %s" % alert_path, file=sys.stderr)
+        webhook = ""
     if webhook and not dry_run:
         payload = {
             "event": event,

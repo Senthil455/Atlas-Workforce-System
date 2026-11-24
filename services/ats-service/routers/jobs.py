@@ -14,9 +14,9 @@ router = APIRouter(tags=["jobs"])
 def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None, regex=r"^(DRAFT|PUBLISHED|CLOSED|FILLED)$"),
+    status: Optional[str] = Query(None, pattern=r"^(DRAFT|PUBLISHED|CLOSED|FILLED)$"),
     department: Optional[str] = Query(None),
-    employment_type: Optional[str] = Query(None, regex=r"^(FULL_TIME|PART_TIME|CONTRACT|INTERNSHIP)$"),
+    employment_type: Optional[str] = Query(None, pattern=r"^(FULL_TIME|PART_TIME|CONTRACT|INTERNSHIP)$"),
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):

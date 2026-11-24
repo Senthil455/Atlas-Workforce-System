@@ -74,7 +74,9 @@ logger = get_logger("ai-copilot-service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # Wildcard origins cannot be combined with credentialed requests; browsers
+    # reject the combination, so keep credentials off unless origins are pinned.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

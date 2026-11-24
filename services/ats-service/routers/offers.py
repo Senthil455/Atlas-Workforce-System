@@ -14,7 +14,7 @@ router = APIRouter(tags=["offers"])
 def list_offers(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None, regex=r"^(DRAFT|SENT|ACCEPTED|DECLINED|EXPIRED)$"),
+    status: Optional[str] = Query(None, pattern=r"^(DRAFT|SENT|ACCEPTED|DECLINED|EXPIRED)$"),
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):

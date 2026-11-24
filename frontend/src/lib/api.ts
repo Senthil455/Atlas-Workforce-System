@@ -765,6 +765,9 @@ export const attendanceApi = {
 };
 
 export const atsApi = {
+  // Open requisitions are published jobs that have not been closed/filled.
+  getOpenReqs: (limit = 100) =>
+    api.get("/ats/jobs", { params: { status: "PUBLISHED", page: 1, pageSize: limit } }),
   getJobs: (params?: {
     page?: number;
     pageSize?: number;

@@ -23,7 +23,7 @@ def list_applications(
         candidate_id: Optional[str] = Query(None),
         status: Optional[str] = Query(
             None,
-            regex=r"^(APPLIED|SCREENING|INTERVIEW_STAGE_1|INTERVIEW_STAGE_2|FINAL_INTERVIEW|OFFER_EXTENDED|OFFER_ACCEPTED|HIRED|REJECTED)$"),
+            pattern=r"^(APPLIED|SCREENING|INTERVIEW_STAGE_1|INTERVIEW_STAGE_2|FINAL_INTERVIEW|OFFER_EXTENDED|OFFER_ACCEPTED|HIRED|REJECTED)$"),
         x_tenant_id: str = Header(
             "default",
             alias="X-Tenant-Id"),

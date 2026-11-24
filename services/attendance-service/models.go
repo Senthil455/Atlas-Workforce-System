@@ -183,7 +183,9 @@ func migrateDB(db *gorm.DB) {
 	// composite (tenant_id, employee_id) index replaces it; drop the legacy
 	// index when it still exists.
 	if db.Migrator().HasIndex(&FaceEnrollment{}, "idx_face_employee") {
-		db.Migrator().DropIndex(&FaceEnrollment{}, "idx_face_employee")
+		if err := db.Migrator().DropIndex(&FaceEnrollment{}, "idx_face_employee"); err != nil {
+			log.Printf("warning: could not drop legacy index idx_face_employee: %v", err)
+		}
 	}
 	if err := db.AutoMigrate(
 		&AttendanceRecord{},

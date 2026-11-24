@@ -186,6 +186,7 @@ export default function AnalyticsPage() {
           </CardContent>
         </Card>
       )}
+      </WidgetBoundary>
 
       <Card className="glass-panel">
         <CardHeader>

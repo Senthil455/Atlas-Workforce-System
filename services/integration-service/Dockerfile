@@ -1,15 +1,15 @@
-FROM python:3.10-alpine AS builder
+FROM python:3.12-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache gcc musl-dev libffi-dev postgresql-dev librdkafka-dev
 COPY services/integration-service/requirements.txt .
-RUN pip install --user --no-cache-dir --ignore-installed typing_extensions>=4.8.0 && \
+RUN pip install --no-cache-dir --user --ignore-installed typing_extensions>=4.8.0 && \
     grep -v "atlas_observability" requirements.txt > req_clean.txt && \
-    pip install --user --no-cache-dir --ignore-installed -r req_clean.txt
+    pip install --no-cache-dir --user --ignore-installed -r req_clean.txt
 COPY services/atlas_observability/ ./services/atlas_observability/
-RUN pip install --user --no-cache-dir --no-deps -e ./services/atlas_observability && \
-    pip install --user --no-cache-dir prometheus-client>=0.19.0
+RUN pip install --no-cache-dir --user --no-deps -e ./services/atlas_observability && \
+    pip install --no-cache-dir --user prometheus-client>=0.19.0
 
-FROM python:3.10-alpine
+FROM python:3.12-alpine
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 COPY --from=builder /app/services/atlas_observability /app/services/atlas_observability
@@ -25,6 +25,7 @@ RUN addgroup -S -g 1001 appgroup && \
     chown -R appuser:appgroup /home/appuser /app
 
 EXPOSE 8016
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8016/health', timeout=4).status == 200 else 1)"
 
 USER appuser
 

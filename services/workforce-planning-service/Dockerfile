@@ -1,13 +1,13 @@
-FROM python:3.10-alpine AS builder
+FROM python:3.12-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache gcc musl-dev libffi-dev postgresql-dev
 COPY services/atlas_observability/ ./services/atlas_observability/
-RUN pip install -e ./services/atlas_observability
+RUN pip install --no-cache-dir -e ./services/atlas_observability
 COPY services/workforce-planning-service/requirements.txt .
 RUN grep -v "atlas_observability" requirements.txt > req_clean.txt && \
-    pip install --user --no-cache-dir -r req_clean.txt
+    pip install --no-cache-dir --user -r req_clean.txt
 
-FROM python:3.10-alpine
+FROM python:3.12-alpine
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 COPY services/workforce-planning-service/ .
@@ -22,6 +22,7 @@ RUN addgroup -S -g 1001 appgroup && \
     chown -R appuser:appgroup /home/appuser /app
 
 EXPOSE 8017
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8017/health', timeout=4).status == 200 else 1)"
 
 USER appuser
 

@@ -92,7 +92,7 @@ def list_interview_slots(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     application_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None, regex=r"^(OPEN|CONFIRMED)$"),
+    status: Optional[str] = Query(None, pattern=r"^(OPEN|CONFIRMED)$"),
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):

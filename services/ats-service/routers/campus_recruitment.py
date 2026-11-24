@@ -12,7 +12,7 @@ router = APIRouter(tags=["campus-recruitment"])
 def list_drives(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None, regex=r"^(PLANNED|UPCOMING|IN_PROGRESS|COMPLETED|CANCELLED)$"),
+    status: Optional[str] = Query(None, pattern=r"^(PLANNED|UPCOMING|IN_PROGRESS|COMPLETED|CANCELLED)$"),
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),
 ):

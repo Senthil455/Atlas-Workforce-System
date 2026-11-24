@@ -278,7 +278,7 @@ jobs:
           pip install -r requirements.txt
         working-directory: services/${{ matrix.service }}
       - name: Install linting tools
-        run: pip install flake8 pytest pytest-asyncio httpx bandit sarif-om jschema-to-python
+        run: pip install flake8 pytest pytest-asyncio httpx httpx2 bandit sarif-om jschema-to-python
         working-directory: services/${{ matrix.service }}
       - name: Syntax check
         run: python -m py_compile main.py

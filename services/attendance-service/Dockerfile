@@ -5,7 +5,7 @@ RUN go mod download
 COPY . .
 RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o attendance-service
 
-FROM alpine:latest
+FROM alpine:3.22
 WORKDIR /app
 COPY --from=builder /app/attendance-service .
 
@@ -15,6 +15,7 @@ RUN addgroup -S -g 1001 appgroup && \
     chown -R appuser:appgroup /app /home/appuser
 
 EXPOSE 8005
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- http://127.0.0.1:8005/health >/dev/null || exit 1
 
 USER appuser
 

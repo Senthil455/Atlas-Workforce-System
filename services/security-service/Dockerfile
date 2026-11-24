@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY services/atlas_observability/ ./services/atlas_observability/
-RUN pip install -e ./services/atlas_observability
+RUN pip install --no-cache-dir -e ./services/atlas_observability
 COPY services/security-service/requirements.txt .
 RUN grep -v "atlas_observability" requirements.txt > req_clean.txt && \
     pip install --no-cache-dir -r req_clean.txt
@@ -13,6 +13,7 @@ RUN groupadd -r -g 1001 appgroup && \
     chown -R appuser:appgroup /app /home/appuser
 
 EXPOSE 8050
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8050/health', timeout=4).status == 200 else 1)"
 
 USER appuser
 

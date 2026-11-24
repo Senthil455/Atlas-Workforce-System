@@ -14,9 +14,9 @@ router = APIRouter(tags=["candidates"])
 def list_candidates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None, regex=r"^(NEW|SCREENING|INTERVIEWING|OFFER|HIRED|REJECTED|WITHDRAWN)$"),
+    status: Optional[str] = Query(None, pattern=r"^(NEW|SCREENING|INTERVIEWING|OFFER|HIRED|REJECTED|WITHDRAWN)$"),
     skills: Optional[str] = Query(None, description="Comma-separated skills"),
-    source: Optional[str] = Query(None, regex=r"^(LINKEDIN|INDEED|REFERRAL|COMPANY_SITE|RECRUITER|OTHER)$"),
+    source: Optional[str] = Query(None, pattern=r"^(LINKEDIN|INDEED|REFERRAL|COMPANY_SITE|RECRUITER|OTHER)$"),
     search: Optional[str] = Query(None, description="Search by name, email, company, position"),
     x_tenant_id: str = Header("default", alias="X-Tenant-Id"),
     db: Session = Depends(get_db),

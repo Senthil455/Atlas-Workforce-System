@@ -24,6 +24,7 @@ RUN addgroup -S -g 1001 appgroup && \
 ENV JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/app/tmp"
 
 EXPOSE 8006
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- http://127.0.0.1:8006/health >/dev/null || exit 1
 
 USER appuser
 
